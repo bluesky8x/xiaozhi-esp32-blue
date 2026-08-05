@@ -16,6 +16,8 @@ public:
     void OnShutdownRequest(std::function<void()> callback);
     void WakeUp();
 
+    bool IsInSleepMode() const { return in_sleep_mode_; }
+
 private:
     void PowerSaveCheck();
 

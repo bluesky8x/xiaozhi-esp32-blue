@@ -94,6 +94,16 @@ if(CONFIG_BOARD_TYPE_BREAD_COMPACT_WIFI)
     set(BOARD_DIR "bread-compact-wifi")
     set(BUILTIN_TEXT_FONT font_noto_sans_basic_14_1)
     set(BUILTIN_ICON_FONT font_material_symbols_14_1)
+elseif(CONFIG_BOARD_TYPE_BLUE_V1)
+    set(BOARD_DIR "blue-v1")
+    set(BUILTIN_TEXT_FONT font_noto_sans_basic_16_4)
+    set(BUILTIN_ICON_FONT font_material_symbols_16_4)
+    set(DEFAULT_EMOJI_COLLECTION otto-gif)
+elseif(CONFIG_BOARD_TYPE_BLUE_V2)
+    set(BOARD_DIR "blue-v2")
+    set(BUILTIN_TEXT_FONT font_noto_sans_basic_16_4)
+    set(BUILTIN_ICON_FONT font_material_symbols_16_4)
+    set(DEFAULT_EMOJI_COLLECTION otto-gif)
 elseif(CONFIG_BOARD_TYPE_BREAD_COMPACT_ML307)
     set(BOARD_DIR "bread-compact-ml307")
     set(BUILTIN_TEXT_FONT font_noto_sans_basic_14_1)
@@ -869,6 +879,11 @@ file(GLOB BOARD_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/boards/${BOARD_DIR}/*.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/boards/${BOARD_DIR}/*.c
 )
+if(CONFIG_BOARD_TYPE_BLUE_V2)
+    list(APPEND BOARD_SOURCES
+        ${CMAKE_CURRENT_SOURCE_DIR}/boards/blue-v1/blue_v1_emoji_display.cc
+        ${CMAKE_CURRENT_SOURCE_DIR}/boards/blue-v1/otto_icon_font.c)
+endif()
 list(APPEND SOURCES ${BOARD_SOURCES})
 
 # Select one audio engine for each chip family
