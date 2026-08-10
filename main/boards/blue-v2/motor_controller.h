@@ -30,6 +30,8 @@ private:
     ledc_channel_t right_in1_ch_;
     ledc_channel_t right_in2_ch_;
     esp_timer_handle_t stop_timer_ = nullptr;
+    int left_speed_ = 0;
+    int right_speed_ = 0;
     static constexpr int kPwmResolutionBits = 10;
     static constexpr int kDutyMax = (1 << kPwmResolutionBits) - 1;
 
@@ -164,8 +166,9 @@ public:
 
         mcp_server.AddTool(
             "self.motor.move",
-            "Drive with per-wheel speed. left/right range -100 (full reverse) to 100 (full forward). "
-            "duration_ms: auto-stop timeout (100-10000).",
+            "Drive straight or custom wheel speeds. left=100 right=100 = forward straight. "
+            "For đi vòng vòng / circle path use self.motor.circle instead (NOT 100,100). "
+            "left/right range -100 to 100. duration_ms auto-stop (100-10000).",
             PropertyList({Property("left", kPropertyTypeInteger, 0, -100, 100),
                           Property("right", kPropertyTypeInteger, 0, -100, 100),
                           Property("duration_ms", kPropertyTypeInteger, MOTOR_AUTO_STOP_MS, 100, 10000)}),
@@ -174,6 +177,17 @@ public:
                 const int right = properties["right"].value<int>();
                 const int duration_ms = properties["duration_ms"].value<int>();
                 Move(left, right, duration_ms);
+                return true;
+            });
+
+        mcp_server.AddTool(
+            "self.motor.circle",
+            "Drive in a circle (left wheel slower). Use for: đi vòng vòng, quay vòng, đi khám phá. "
+            "duration_ms auto-stop (1000-30000).",
+            PropertyList({Property("duration_ms", kPropertyTypeInteger, MOTOR_AUTO_STOP_MS, 1000, 30000)}),
+            [this](const PropertyList& properties) -> ReturnValue {
+                const int duration_ms = properties["duration_ms"].value<int>();
+                Move(50, 100, duration_ms);
                 return true;
             });
 
@@ -211,6 +225,8 @@ public:
     }
 
     void Move(int left_speed, int right_speed, int duration_ms = MOTOR_AUTO_STOP_MS) {
+        left_speed_ = left_speed;
+        right_speed_ = right_speed;
         DriveSide(left_in1_ch_, left_in2_ch_, left_speed);
         DriveSide(right_in1_ch_, right_in2_ch_, right_speed);
         ESP_LOGI(MOTOR_TAG, "Move left=%d right=%d duration=%dms", left_speed, right_speed, duration_ms);
@@ -223,8 +239,27 @@ public:
 
     void Stop() {
         esp_timer_stop(stop_timer_);
+        left_speed_ = 0;
+        right_speed_ = 0;
         Move(0, 0, 0);
         ESP_LOGI(MOTOR_TAG, "Motors stopped");
+    }
+
+    bool IsMoving() const {
+        return left_speed_ != 0 || right_speed_ != 0;
+    }
+
+    // Forward or arc (circle): both wheels driving ahead.
+    bool IsMovingForward() const {
+        return left_speed_ > 0 && right_speed_ > 0;
+    }
+
+    int LeftSpeed() const {
+        return left_speed_;
+    }
+
+    int RightSpeed() const {
+        return right_speed_;
     }
 };
 
