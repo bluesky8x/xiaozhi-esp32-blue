@@ -49,9 +49,17 @@
 // 0 = experimental emoji/face UI.
 #define BLUE_V2_USE_V3_DISPLAY 0
 
-// 1 = MCU + LCD bench: Otto GIF only — no motor, I2S, ToF, or robot MCP tools.
+// 1 = MCU + LCD bench: Otto GIF — no motor, ToF, or robot MCP tools.
 // WiFi/OTA still run; use to verify Otto assets without SPI/DMA interference.
 #define BLUE_V2_OTTO_LCD_ONLY 1
+
+// 1 = add INMP441 + MAX98357 (I2S deferred until after activation — protects LCD SPI).
+// Requires BLUE_V2_OTTO_LCD_ONLY=1. Wake word stays off; use boot/touch to start chat.
+#define BLUE_V2_OTTO_AUDIO_ENABLE 1
+
+#if BLUE_V2_OTTO_LCD_ONLY && BLUE_V2_OTTO_AUDIO_ENABLE
+#define BLUE_V2_OTTO_DEFER_I2S 1
+#endif
 
 #define BLUE_V2_DEFAULT_EMOTION "neutral"
 

@@ -10,9 +10,12 @@
 #if BLUE_V2_LCD_TEST_SCREEN || BLUE_V2_USE_V3_DISPLAY
 #include "../blue-v3/blue_v3_test_display.h"
 #endif
-#if BLUE_V2_LCD_TEST_SCREEN || BLUE_V2_OTTO_LCD_ONLY
+#if BLUE_V2_LCD_TEST_SCREEN || (BLUE_V2_OTTO_LCD_ONLY && !BLUE_V2_OTTO_AUDIO_ENABLE)
 #include "audio_codec.h"
-#else
+#endif
+#if BLUE_V2_OTTO_LCD_ONLY && BLUE_V2_OTTO_AUDIO_ENABLE
+#include "codecs/no_audio_codec.h"
+#elif !BLUE_V2_LCD_TEST_SCREEN && !BLUE_V2_OTTO_LCD_ONLY
 #include "codecs/no_audio_codec.h"
 #if !BLUE_V2_USE_V3_DISPLAY
 #include "blue_v2_face_display.h"
@@ -67,7 +70,7 @@ void LogResetReason() {
 
 }  // namespace
 
-#if BLUE_V2_LCD_TEST_SCREEN || BLUE_V2_OTTO_LCD_ONLY
+#if BLUE_V2_LCD_TEST_SCREEN || (BLUE_V2_OTTO_LCD_ONLY && !BLUE_V2_OTTO_AUDIO_ENABLE)
 
 namespace {
 
@@ -187,7 +190,11 @@ private:
         display_ = new BlueV2OttoDisplay(panel_io, panel, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X,
                                            DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y,
                                            DISPLAY_SWAP_XY);
-        ESP_LOGI(TAG, "ST7789 + Otto GIF bench (BLUE_V2_OTTO_LCD_ONLY=1, no motor/I2S/tools)");
+#if BLUE_V2_OTTO_AUDIO_ENABLE
+        ESP_LOGI(TAG, "ST7789 + Otto GIF bench (LCD + I2S mic/spk, no motor/wake word)");
+#else
+        ESP_LOGI(TAG, "ST7789 + Otto GIF bench (LCD only, no I2S/motor/wake word)");
+#endif
 #elif BLUE_V2_LCD_TEST_SCREEN || BLUE_V2_USE_V3_DISPLAY
         display_ = new BlueV3TestDisplay(panel_io, panel, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X,
                                          DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y,
@@ -324,7 +331,8 @@ private:
             SystemReset::FactoryResetAndReboot(3);
         });
 
-        if (TOUCH_BUTTON_GPIO != GPIO_NUM_NC && !BLUE_V2_OTTO_LCD_ONLY) {
+        if (TOUCH_BUTTON_GPIO != GPIO_NUM_NC &&
+            (!BLUE_V2_OTTO_LCD_ONLY || BLUE_V2_OTTO_AUDIO_ENABLE)) {
             touch_button_.OnClick([this]() { HandleTouchClick(); });
         }
     }
@@ -364,8 +372,10 @@ public:
 #if !BLUE_V2_LCD_TEST_SCREEN && !BLUE_V2_OTTO_LCD_ONLY
         InitializeTools();
         ESP_LOGI(TAG, "Robot tools initialized (deferred until activation)");
+#elif BLUE_V2_OTTO_LCD_ONLY && BLUE_V2_OTTO_AUDIO_ENABLE
+        ESP_LOGI(TAG, "Otto bench: audio deferred until activation (no motor/wake word)");
 #elif BLUE_V2_OTTO_LCD_ONLY
-        ESP_LOGI(TAG, "Otto LCD bench: skipped motor/I2S/ToF init");
+        ESP_LOGI(TAG, "Otto LCD bench: display only (no I2S/motor)");
 #endif
     }
 
@@ -375,7 +385,7 @@ public:
     }
 
     virtual AudioCodec* GetAudioCodec() override {
-#if BLUE_V2_LCD_TEST_SCREEN || BLUE_V2_OTTO_LCD_ONLY
+#if BLUE_V2_LCD_TEST_SCREEN || (BLUE_V2_OTTO_LCD_ONLY && !BLUE_V2_OTTO_AUDIO_ENABLE)
         static DisplayTestAudioCodec codec;
         return &codec;
 #else
