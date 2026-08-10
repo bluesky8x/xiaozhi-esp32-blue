@@ -15,7 +15,12 @@
 #endif
 #if BLUE_V2_OTTO_LCD_ONLY && BLUE_V2_OTTO_AUDIO_ENABLE
 #include "codecs/no_audio_codec.h"
-#elif !BLUE_V2_LCD_TEST_SCREEN && !BLUE_V2_OTTO_LCD_ONLY
+#endif
+#if BLUE_V2_OTTO_LCD_ONLY && BLUE_V2_OTTO_MOTOR_ENABLE
+#include "motor_controller.h"
+#include "../blue-v1/power_controller.h"
+#endif
+#if !BLUE_V2_LCD_TEST_SCREEN && !BLUE_V2_OTTO_LCD_ONLY
 #include "codecs/no_audio_codec.h"
 #if !BLUE_V2_USE_V3_DISPLAY
 #include "blue_v2_face_display.h"
@@ -29,6 +34,7 @@
 #if BLUE_V2_OTTO_LCD_ONLY
 #include "blue_v2_otto_display.h"
 #endif
+#include "lcd_display.h"
 
 #include <esp_log.h>
 #include <esp_system.h>
@@ -190,8 +196,10 @@ private:
         display_ = new BlueV2OttoDisplay(panel_io, panel, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X,
                                            DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y,
                                            DISPLAY_SWAP_XY);
-#if BLUE_V2_OTTO_AUDIO_ENABLE
-        ESP_LOGI(TAG, "ST7789 + Otto GIF bench (LCD + I2S mic/spk, no motor/wake word)");
+#if BLUE_V2_OTTO_MOTOR_ENABLE
+        ESP_LOGI(TAG, "ST7789 + Otto bench (LCD + I2S + motor, no wake word)");
+#elif BLUE_V2_OTTO_AUDIO_ENABLE
+        ESP_LOGI(TAG, "ST7789 + Otto bench (LCD + I2S, no motor/wake word)");
 #else
         ESP_LOGI(TAG, "ST7789 + Otto GIF bench (LCD only, no I2S/motor/wake word)");
 #endif
@@ -332,10 +340,23 @@ private:
         });
 
         if (TOUCH_BUTTON_GPIO != GPIO_NUM_NC &&
-            (!BLUE_V2_OTTO_LCD_ONLY || BLUE_V2_OTTO_AUDIO_ENABLE)) {
+            (!BLUE_V2_OTTO_LCD_ONLY || BLUE_V2_OTTO_TOUCH_ENABLE)) {
             touch_button_.OnClick([this]() { HandleTouchClick(); });
+            ESP_LOGI(TAG, "Touch button ready on GPIO %d", TOUCH_BUTTON_GPIO);
         }
     }
+
+#if BLUE_V2_OTTO_LCD_ONLY && BLUE_V2_OTTO_MOTOR_ENABLE
+    void InitializeOttoBenchTools() {
+        static MotorController motor(MOTOR_LEFT_IN1, MOTOR_LEFT_IN2, MOTOR_RIGHT_IN1, MOTOR_RIGHT_IN2);
+        static PowerController power_ctrl(power_save_timer_);
+        bench_motor_ = &motor;
+        (void)motor;
+        ESP_LOGI(TAG, "Motor MCP tools registered (MX1508 GPIO 11-14, bench mode)");
+    }
+
+    MotorController* bench_motor_ = nullptr;
+#endif
 
 #if !BLUE_V2_LCD_TEST_SCREEN && !BLUE_V2_OTTO_LCD_ONLY
     void InitializeTools() {
@@ -365,17 +386,18 @@ public:
         InitializeLcdDisplay();
         InitializePowerSaveTimer();
         InitializeButtons();
-        // Motor PWM + I2S before activation corrupt SPI flush — defer to OnApplicationDisplayReady().
+        // I2S deferred until activation — motor GPIO is safe at boot.
     }
 
     void OnApplicationDisplayReady() override {
 #if !BLUE_V2_LCD_TEST_SCREEN && !BLUE_V2_OTTO_LCD_ONLY
         InitializeTools();
         ESP_LOGI(TAG, "Robot tools initialized (deferred until activation)");
-#elif BLUE_V2_OTTO_LCD_ONLY && BLUE_V2_OTTO_AUDIO_ENABLE
-        ESP_LOGI(TAG, "Otto bench: audio deferred until activation (no motor/wake word)");
 #elif BLUE_V2_OTTO_LCD_ONLY
-        ESP_LOGI(TAG, "Otto LCD bench: display only (no I2S/motor)");
+#if BLUE_V2_OTTO_MOTOR_ENABLE
+        InitializeOttoBenchTools();
+#endif
+        ESP_LOGI(TAG, "Otto bench init done (no wake word)");
 #endif
     }
 

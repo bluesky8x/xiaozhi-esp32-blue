@@ -5,90 +5,62 @@
 #include "mcp_server.h"
 
 #include <driver/gpio.h>
-#include <driver/ledc.h>
 #include <esp_log.h>
 #include <esp_timer.h>
 
 #include <algorithm>
-#include <cmath>
 
 #define MOTOR_TAG "MotorController"
 
-// MX1508 / L9110S: PWM on IN1–IN4 (ESP-IDF LEDC, same role as Arduino ledcAttach on GPIO 11–14).
-#ifndef MOTOR_PWM_FREQ_HZ
-#define MOTOR_PWM_FREQ_HZ 20000
+#ifndef MOTOR_USE_GPIO_ONLY
+#define MOTOR_USE_GPIO_ONLY 1
 #endif
 
+// MX1508 / L9110S on IN1–IN4. GPIO mode: sign = direction, magnitude ignored (full ON/OFF).
 class MotorController {
 private:
     gpio_num_t left_in1_;
     gpio_num_t left_in2_;
     gpio_num_t right_in1_;
     gpio_num_t right_in2_;
-    ledc_channel_t left_in1_ch_;
-    ledc_channel_t left_in2_ch_;
-    ledc_channel_t right_in1_ch_;
-    ledc_channel_t right_in2_ch_;
     esp_timer_handle_t stop_timer_ = nullptr;
+    bool gpio_initialized_ = false;
     int left_speed_ = 0;
     int right_speed_ = 0;
-    static constexpr int kPwmResolutionBits = 10;
-    static constexpr int kDutyMax = (1 << kPwmResolutionBits) - 1;
 
     static void StopTimerCallback(void* arg) {
         static_cast<MotorController*>(arg)->Stop();
     }
 
-    void InitPwmTimer() {
-        ledc_timer_config_t timer_cfg = {
-            .speed_mode = LEDC_LOW_SPEED_MODE,
-            .duty_resolution = LEDC_TIMER_10_BIT,
-            .timer_num = LEDC_TIMER_1,
-            .freq_hz = MOTOR_PWM_FREQ_HZ,
-            .clk_cfg = LEDC_AUTO_CLK,
-            .deconfigure = false,
-        };
-        ESP_ERROR_CHECK(ledc_timer_config(&timer_cfg));
-    }
-
-    void AttachPwmPin(gpio_num_t gpio, ledc_channel_t channel) {
-        ledc_channel_config_t channel_cfg = {
-            .gpio_num = gpio,
-            .speed_mode = LEDC_LOW_SPEED_MODE,
-            .channel = channel,
-            .intr_type = LEDC_INTR_DISABLE,
-            .timer_sel = LEDC_TIMER_1,
-            .duty = 0,
-            .hpoint = 0,
-            .flags = {
-                .output_invert = 0,
-            },
-        };
-        ESP_ERROR_CHECK(ledc_channel_config(&channel_cfg));
-    }
-
-    void SetPwmDuty(ledc_channel_t channel, int speed_percent) {
-        const int duty = std::clamp(speed_percent, 0, 100) * kDutyMax / 100;
-        ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, channel, duty));
-        ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, channel));
-    }
-
-    // MX1508: forward = PWM on IN1 + IN2 LOW; reverse = PWM on IN2 + IN1 LOW.
-    void DriveSide(ledc_channel_t in1_ch, ledc_channel_t in2_ch, int speed) {
-        speed = std::clamp(speed, -100, 100);
-        if (speed == 0) {
-            SetPwmDuty(in1_ch, 0);
-            SetPwmDuty(in2_ch, 0);
+    void InitMotorGpio() {
+        if (gpio_initialized_) {
             return;
         }
+        const gpio_num_t pins[] = {left_in1_, left_in2_, right_in1_, right_in2_};
+        for (gpio_num_t pin : pins) {
+            gpio_reset_pin(pin);
+            gpio_set_direction(pin, GPIO_MODE_OUTPUT);
+            gpio_set_level(pin, 0);
+        }
+        gpio_initialized_ = true;
+        ESP_LOGI(MOTOR_TAG, "Motor GPIO outputs ready on %d/%d/%d/%d (no LEDC)",
+                 left_in1_, left_in2_, right_in1_, right_in2_);
+    }
 
-        const int magnitude = std::abs(speed);
+    // MX1508: forward = IN1 HIGH + IN2 LOW; reverse = IN2 HIGH + IN1 LOW.
+    void DriveSide(gpio_num_t in1, gpio_num_t in2, int speed) {
+        speed = std::clamp(speed, -100, 100);
+        if (speed == 0) {
+            gpio_set_level(in1, 0);
+            gpio_set_level(in2, 0);
+            return;
+        }
         if (speed > 0) {
-            SetPwmDuty(in1_ch, magnitude);
-            SetPwmDuty(in2_ch, 0);
+            gpio_set_level(in1, 1);
+            gpio_set_level(in2, 0);
         } else {
-            SetPwmDuty(in1_ch, 0);
-            SetPwmDuty(in2_ch, magnitude);
+            gpio_set_level(in1, 0);
+            gpio_set_level(in2, 1);
         }
     }
 
@@ -105,17 +77,8 @@ public:
         : left_in1_(left_in1),
           left_in2_(left_in2),
           right_in1_(right_in1),
-          right_in2_(right_in2),
-          left_in1_ch_(LEDC_CHANNEL_1),
-          left_in2_ch_(LEDC_CHANNEL_2),
-          right_in1_ch_(LEDC_CHANNEL_3),
-          right_in2_ch_(LEDC_CHANNEL_4) {
-        // One timer, four channels — analogous to Arduino ledcAttach() on each of 11–14.
-        InitPwmTimer();
-        AttachPwmPin(left_in1_, left_in1_ch_);
-        AttachPwmPin(left_in2_, left_in2_ch_);
-        AttachPwmPin(right_in1_, right_in1_ch_);
-        AttachPwmPin(right_in2_, right_in2_ch_);
+          right_in2_(right_in2) {
+        InitMotorGpio();
 
         esp_timer_create_args_t timer_args = {
             .callback = StopTimerCallback,
@@ -137,22 +100,22 @@ public:
         mcp_server.AddTool("self.motor.forward",
                            "Move robot forward. Use for: đi tới, tiến, đi thẳng, go forward.",
                            PropertyList(), [this](const PropertyList&) -> ReturnValue {
-            Move(100, 100, MOTOR_AUTO_STOP_MS);
-            return true;
-        });
+                               Move(100, 100, MOTOR_AUTO_STOP_MS);
+                               return true;
+                           });
 
         mcp_server.AddTool("self.motor.backward",
                            "Move robot backward. Use for: lùi, đi lùi, go back.",
                            PropertyList(), [this](const PropertyList&) -> ReturnValue {
-            Move(-100, -100, MOTOR_AUTO_STOP_MS);
-            return true;
-        });
+                               Move(-100, -100, MOTOR_AUTO_STOP_MS);
+                               return true;
+                           });
 
         mcp_server.AddTool("self.motor.turn_left",
                            "Turn robot left in place. Use for: quay sang trái, rẽ trái, turn left.",
                            PropertyList(),
                            [this](const PropertyList&) -> ReturnValue {
-                               Move(-70, 70, MOTOR_AUTO_STOP_MS);
+                               Move(-100, 100, MOTOR_AUTO_STOP_MS);
                                return true;
                            });
 
@@ -160,15 +123,14 @@ public:
                            "Turn robot right in place. Use for: quay sang phải, rẽ phải, turn right.",
                            PropertyList(),
                            [this](const PropertyList&) -> ReturnValue {
-                               Move(70, -70, MOTOR_AUTO_STOP_MS);
+                               Move(100, -100, MOTOR_AUTO_STOP_MS);
                                return true;
                            });
 
         mcp_server.AddTool(
             "self.motor.move",
-            "Drive straight or custom wheel speeds. left=100 right=100 = forward straight. "
-            "For đi vòng vòng / circle path use self.motor.circle instead (NOT 100,100). "
-            "left/right range -100 to 100. duration_ms auto-stop (100-10000).",
+            "Drive straight or turn. left/right sign = direction (-100..100), full speed when non-zero. "
+            "For circle use self.motor.circle. duration_ms auto-stop (100-10000).",
             PropertyList({Property("left", kPropertyTypeInteger, 0, -100, 100),
                           Property("right", kPropertyTypeInteger, 0, -100, 100),
                           Property("duration_ms", kPropertyTypeInteger, MOTOR_AUTO_STOP_MS, 100, 10000)}),
@@ -182,12 +144,11 @@ public:
 
         mcp_server.AddTool(
             "self.motor.circle",
-            "Drive in a circle (left wheel slower). Use for: đi vòng vòng, quay vòng, đi khám phá. "
-            "duration_ms auto-stop (1000-30000).",
+            "Drive in a circle (left wheel reverse). duration_ms auto-stop (1000-30000).",
             PropertyList({Property("duration_ms", kPropertyTypeInteger, MOTOR_AUTO_STOP_MS, 1000, 30000)}),
             [this](const PropertyList& properties) -> ReturnValue {
                 const int duration_ms = properties["duration_ms"].value<int>();
-                Move(50, 100, duration_ms);
+                Move(-100, 100, duration_ms);
                 return true;
             });
 
@@ -202,17 +163,17 @@ public:
         });
 
         mcp_server.AddTool("self.chassis.turn_left", "Turn left", PropertyList(), [this](const PropertyList&) -> ReturnValue {
-            Move(-70, 70, MOTOR_AUTO_STOP_MS);
+            Move(-100, 100, MOTOR_AUTO_STOP_MS);
             return true;
         });
 
         mcp_server.AddTool("self.chassis.turn_right", "Turn right", PropertyList(), [this](const PropertyList&) -> ReturnValue {
-            Move(70, -70, MOTOR_AUTO_STOP_MS);
+            Move(100, -100, MOTOR_AUTO_STOP_MS);
             return true;
         });
 
-        ESP_LOGI(MOTOR_TAG, "Motor MCP tools registered (MX1508 PWM on GPIO %d/%d/%d/%d, %d Hz)",
-                 left_in1_, left_in2_, right_in1_, right_in2_, MOTOR_PWM_FREQ_HZ);
+        ESP_LOGI(MOTOR_TAG, "Motor MCP tools registered (GPIO on/off, MX1508 %d/%d/%d/%d)",
+                 left_in1_, left_in2_, right_in1_, right_in2_);
     }
 
     ~MotorController() {
@@ -225,10 +186,11 @@ public:
     }
 
     void Move(int left_speed, int right_speed, int duration_ms = MOTOR_AUTO_STOP_MS) {
+        InitMotorGpio();
         left_speed_ = left_speed;
         right_speed_ = right_speed;
-        DriveSide(left_in1_ch_, left_in2_ch_, left_speed);
-        DriveSide(right_in1_ch_, right_in2_ch_, right_speed);
+        DriveSide(left_in1_, left_in2_, left_speed);
+        DriveSide(right_in1_, right_in2_, right_speed);
         ESP_LOGI(MOTOR_TAG, "Move left=%d right=%d duration=%dms", left_speed, right_speed, duration_ms);
         if (left_speed == 0 && right_speed == 0) {
             esp_timer_stop(stop_timer_);
@@ -237,30 +199,26 @@ public:
         }
     }
 
+    void PreparePwm() {}
+
     void Stop() {
         esp_timer_stop(stop_timer_);
         left_speed_ = 0;
         right_speed_ = 0;
-        Move(0, 0, 0);
+        if (gpio_initialized_) {
+            DriveSide(left_in1_, left_in2_, 0);
+            DriveSide(right_in1_, right_in2_, 0);
+        }
         ESP_LOGI(MOTOR_TAG, "Motors stopped");
     }
 
-    bool IsMoving() const {
-        return left_speed_ != 0 || right_speed_ != 0;
-    }
+    bool IsMoving() const { return left_speed_ != 0 || right_speed_ != 0; }
 
-    // Forward or arc (circle): both wheels driving ahead.
-    bool IsMovingForward() const {
-        return left_speed_ > 0 && right_speed_ > 0;
-    }
+    bool IsMovingForward() const { return left_speed_ > 0 && right_speed_ > 0; }
 
-    int LeftSpeed() const {
-        return left_speed_;
-    }
+    int LeftSpeed() const { return left_speed_; }
 
-    int RightSpeed() const {
-        return right_speed_;
-    }
+    int RightSpeed() const { return right_speed_; }
 };
 
 #endif  // __MOTOR_CONTROLLER_H__

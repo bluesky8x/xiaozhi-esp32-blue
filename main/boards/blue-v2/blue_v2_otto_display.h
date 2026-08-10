@@ -10,6 +10,8 @@ public:
     void SetupUI() override;
     void UpdateStatusBar(bool update_all = false) override;
     void RestoreFace();
+    /** Panel reset + emotion reload after motor PWM disturbs SPI. */
+    void HardRestoreFace();
 };
 
 #endif  // BLUE_V2_OTTO_DISPLAY_H

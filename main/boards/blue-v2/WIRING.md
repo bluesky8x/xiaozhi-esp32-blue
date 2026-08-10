@@ -36,7 +36,7 @@ Nguồn tham chiếu firmware: `main/boards/blue-v2/config.h`
 | | | VCC / GND | **3.3 V / GND** | |
 | 4 | **TTP223** (touch) | SIG / OUT | **16** | Click = toggle chat / wake |
 | | | VCC / GND | **3.3 V / GND** | |
-| 5 | **MX1508** (motor driver) | IN1 | **14** | Bánh trái A — LEDC PWM 20 kHz |
+| 5 | **MX1508** (motor driver) | IN1 | **14** | Bánh trái A — GPIO on/off (no PWM) |
 | | | IN2 | **13** | Bánh trái B |
 | | | IN3 | **12** | Bánh phải A |
 | | | IN4 | **11** | Bánh phải B |
@@ -123,7 +123,7 @@ Firmware gọi reset phần cứng qua GPIO 18 khi pin ≠ `NC`; nếu RES đã 
 
 > Không dùng chạm để mute mic khi đang nghe — tránh treo I2S duplex trên breadboard.
 
-### 5. MX1508 — motor driver (LEDC PWM)
+### 5. MX1508 — motor driver (GPIO on/off)
 
 | Chân MX1508 | ESP32-S3 | Motor |
 |-------------|----------|-------|
@@ -132,7 +132,8 @@ Firmware gọi reset phần cứng qua GPIO 18 khi pin ≠ `NC`; nếu RES đã 
 | IN3 | **12** | Phải A |
 | IN4 | **11** | Phải B |
 
-- PWM **20 kHz**, 10-bit trên cả 4 chân IN (`MOTOR_PWM_FREQ_HZ`)
+- Firmware bật/tắt IN1–IN4 bằng GPIO (`MOTOR_USE_GPIO_ONLY=1`) — không LEDC, tránh xung đột SPI màn hình
+- Dấu speed chỉ chọn chiều quay; không điều tốc (full ON khi di chuyển)
 - Tự dừng sau **5 s** mặc định (`MOTOR_AUTO_STOP_MS`)
 - OUT1/OUT2 → motor trái; OUT3/OUT4 → motor phải
 

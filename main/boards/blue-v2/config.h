@@ -56,9 +56,14 @@
 // 1 = add INMP441 + MAX98357 (I2S deferred until after activation — protects LCD SPI).
 // Requires BLUE_V2_OTTO_LCD_ONLY=1. Wake word stays off; use boot/touch to start chat.
 #define BLUE_V2_OTTO_AUDIO_ENABLE 1
+// Requires BLUE_V2_OTTO_LCD_ONLY=1. Registers self.motor.* / self.chassis.* MCP tools.
+#define BLUE_V2_OTTO_MOTOR_ENABLE 1
+
+// 1 = TTP223 on GPIO 16 — toggle chat (same as BOOT). Works without wake word.
+#define BLUE_V2_OTTO_TOUCH_ENABLE 1
 
 #if BLUE_V2_OTTO_LCD_ONLY && BLUE_V2_OTTO_AUDIO_ENABLE
-#define BLUE_V2_OTTO_DEFER_I2S 1
+#define BLUE_V2_OTTO_DEFER_HEAVY 1
 #endif
 
 #define BLUE_V2_DEFAULT_EMOTION "neutral"
@@ -74,12 +79,12 @@
 // No separate decor GPIO — use RGB 48 for status; MCP self.lamp optional on future PCB
 #define DECOR_LED_GPIO        GPIO_NUM_NC
 
-// MX1508 — PWM on IN1–IN4 (module IN1=14, IN2=13, IN3=12, IN4=11)
+// MX1508 — IN1–IN4 as digital GPIO (no LEDC — avoids ST7789 SPI conflict on Blue V2).
+#define MOTOR_USE_GPIO_ONLY 1
 #define MOTOR_LEFT_IN1   GPIO_NUM_14
 #define MOTOR_LEFT_IN2   GPIO_NUM_13
 #define MOTOR_RIGHT_IN1  GPIO_NUM_12
 #define MOTOR_RIGHT_IN2  GPIO_NUM_11
-#define MOTOR_PWM_FREQ_HZ  20000
 #define MOTOR_AUTO_STOP_MS 5000
 
 // INMP441: shift 13 = headroom vs clip; gain 1.0 = no extra boost.

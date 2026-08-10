@@ -27,3 +27,10 @@ void BlueV2OttoDisplay::RestoreFace() {
     SetEmotion(BLUE_V2_DEFAULT_EMOTION);
     RefreshNow();
 }
+
+void BlueV2OttoDisplay::HardRestoreFace() {
+    RecoverPanel();
+    SetEmotion(BLUE_V2_DEFAULT_EMOTION);
+    RefreshNow();
+    ESP_LOGI(TAG, "HardRestoreFace after SPI glitch");
+}
