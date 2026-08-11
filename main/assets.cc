@@ -19,6 +19,14 @@
 
 #include <cstring>
 
+#include <sdkconfig.h>
+#if CONFIG_BOARD_TYPE_BLUE_V2
+#include "boards/blue-v2/config.h"
+#endif
+#if CONFIG_BOARD_TYPE_BLUE_V4
+#include "boards/blue-v4/config.h"
+#endif
+
 #define TAG "Assets"
 #define PARTITION_LABEL "assets"
 
@@ -390,12 +398,33 @@ bool Assets::LvglStrategy::Apply(Assets* assets, bool refresh_display_theme) {
 
     if (refresh_display_theme) {
         auto display = Board::GetInstance().GetDisplay();
+#if CONFIG_BOARD_TYPE_BLUE_V2 && BLUE_V2_USE_V3_DISPLAY
+        ESP_LOGI(TAG, "Blue V2: skip display theme refresh (V3 test driver)");
+#else
         ESP_LOGI(TAG, "Refreshing display theme...");
 
+#if CONFIG_BOARD_TYPE_BLUE_V2
+        if (dark_theme != nullptr) {
+            dark_theme->set_background_image(nullptr);
+        }
+        display->SetTheme(dark_theme);
+#elif CONFIG_BOARD_TYPE_BLUE_V4
+        if (auto* light = LvglThemeManager::GetInstance().GetTheme("light")) {
+            display->SetTheme(light);
+        }
+        display->SetEmotion(BLUE_V4_DEFAULT_EMOTION);
+#elif CONFIG_BOARD_TYPE_BLUE_V2 && BLUE_V2_OTTO_LCD_ONLY
+        if (auto* light = LvglThemeManager::GetInstance().GetTheme("light")) {
+            display->SetTheme(light);
+        }
+        display->SetEmotion(BLUE_V2_DEFAULT_EMOTION);
+#else
         auto current_theme = display->GetTheme();
         if (current_theme != nullptr) {
             display->SetTheme(current_theme);
         }
+#endif
+#endif
 
         // Parse hide_subtitle configuration
         cJSON* hide_subtitle = cJSON_GetObjectItem(root, "hide_subtitle");

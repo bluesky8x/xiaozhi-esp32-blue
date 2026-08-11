@@ -54,6 +54,12 @@ public:
 
     // Set whether to hide chat messages/subtitles
     void SetHideSubtitle(bool hide);
+
+    // Force LVGL to flush the full screen (call with lock held internally).
+    void RefreshNow();
+
+    /** ST7789 reset after SPI/DMA glitch (motor LEDC, I2S). Call before SetEmotion. */
+    void RecoverPanel();
 };
 
 // SPI LCD display

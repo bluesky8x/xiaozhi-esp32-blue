@@ -15,11 +15,14 @@ public:
     void OnExitSleepMode(std::function<void()> callback);
     void OnShutdownRequest(std::function<void()> callback);
     void WakeUp();
+    /** Enter sleep immediately when the device is idle (MCP / user goodbye). */
+    void EnterSleepNow();
 
     bool IsInSleepMode() const { return in_sleep_mode_; }
 
 private:
     void PowerSaveCheck();
+    void ApplySleepMode();
 
     esp_timer_handle_t power_save_timer_ = nullptr;
     bool enabled_ = false;

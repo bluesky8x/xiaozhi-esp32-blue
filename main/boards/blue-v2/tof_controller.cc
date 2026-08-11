@@ -9,6 +9,7 @@
 #include <driver/gpio.h>
 #include <driver/i2c_master.h>
 #include <esp_log.h>
+#include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -106,6 +107,18 @@ std::string JsonCalResult(bool ok, int distance_mm, int32_t offset_um, const cha
     return std::string(buf);
 }
 
+int AbsDeltaInt(int a, int b) {
+    return a >= b ? a - b : b - a;
+}
+
+void TryAbortMeasurement(vl53l0x_handle_t sensor) {
+    if (sensor == nullptr) {
+        return;
+    }
+    (void)vl53l0x_stop_measurement(sensor, 500);
+    (void)vl53l0x_clear_interrupt_mask(sensor);
+}
+
 }  // namespace
 
 TofController& TofController::Instance() {
@@ -147,13 +160,13 @@ bool TofController::SaveCalibration() {
     return true;
 }
 
-bool TofController::EnsureRefCalibration() {
+bool TofController::EnsureRefCalibration(bool force_fresh) {
     auto* sensor = reinterpret_cast<vl53l0x_handle_t>(sensor_);
     if (!sensor) {
         return false;
     }
 
-    if (calibrated_ && ref_vhv_ != 0) {
+    if (!force_fresh && calibrated_ && ref_vhv_ != 0) {
         vl53l0x_ref_calibration_t ref = {.vhv_settings = ref_vhv_, .phase_cal = ref_phase_};
         esp_err_t err = vl53l0x_set_ref_calibration(sensor, &ref);
         if (err != ESP_OK) {
@@ -292,6 +305,14 @@ void TofController::RegisterMcpTools() {
                      calibrated_ ? "true" : "false", static_cast<long>(cal_distance_mm_));
             return std::string(buf);
         });
+
+    mcp.AddTool("self.tof.clear_calibration",
+                "Clear saved ToF calibration from NVS. Obstacle guard uses fallback thresholds until "
+                "self.tof.calibrate succeeds.",
+                PropertyList(), [this](const PropertyList&) -> ReturnValue {
+                    return ClearCalibration() ? std::string("{\"ok\":true}") :
+                                                std::string("{\"ok\":false}");
+                });
 }
 
 bool TofController::Init() {
@@ -329,13 +350,136 @@ bool TofController::Init() {
     return true;
 }
 
+bool TofController::ReinitSensor(bool force_ref_cal) {
+    auto* sensor = reinterpret_cast<vl53l0x_handle_t>(sensor_);
+    if (sensor == nullptr) {
+        return false;
+    }
+    TryAbortMeasurement(sensor);
+    if (vl53l0x_reset(sensor) == ESP_OK) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    if (vl53l0x_init(sensor) != ESP_OK) {
+        ESP_LOGE(TAG, "vl53l0x_init failed");
+        return false;
+    }
+    if (vl53l0x_set_profile(sensor, VL53L0X_PROFILE_DEFAULT) != ESP_OK) {
+        ESP_LOGW(TAG, "set_profile failed after reinit");
+    }
+    if (!EnsureRefCalibration(force_ref_cal)) {
+        ESP_LOGE(TAG, "ref_calibration failed after reinit");
+        return false;
+    }
+    if (calibrated_ && !ApplyStoredCalibration()) {
+        ESP_LOGW(TAG, "stored calibration not applied after reinit");
+    }
+    return true;
+}
+
+bool TofController::RecreateFrontSensor() {
+    auto* bus = reinterpret_cast<i2c_master_bus_handle_t>(i2c_bus_);
+    if (bus == nullptr) {
+        return false;
+    }
+    auto* sensor = reinterpret_cast<vl53l0x_handle_t>(sensor_);
+    if (sensor != nullptr) {
+        TryAbortMeasurement(sensor);
+        if (vl53l0x_destroy(sensor) != ESP_OK) {
+            ESP_LOGE(TAG, "vl53l0x_destroy failed — press RESET on ESP");
+            return false;
+        }
+        sensor_ = nullptr;
+    }
+    if (i2c_master_bus_reset(bus) != ESP_OK) {
+        ESP_LOGE(TAG, "bus reset before recreate failed");
+        return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(50));
+    auto* created = reinterpret_cast<vl53l0x_handle_t*>(&sensor_);
+    if (vl53l0x_create(created, bus) != ESP_OK) {
+        ESP_LOGE(TAG, "vl53l0x_create failed after recreate");
+        return false;
+    }
+    sensor = *created;
+    if (vl53l0x_init(sensor) != ESP_OK) {
+        ESP_LOGE(TAG, "vl53l0x_init failed after recreate");
+        return false;
+    }
+    if (vl53l0x_set_profile(sensor, VL53L0X_PROFILE_DEFAULT) != ESP_OK) {
+        ESP_LOGW(TAG, "set_profile failed after recreate");
+    }
+    if (!EnsureRefCalibration(true)) {
+        ESP_LOGE(TAG, "ref_calibration failed after recreate");
+        return false;
+    }
+    if (calibrated_ && !ApplyStoredCalibration()) {
+        ESP_LOGW(TAG, "stored calibration not applied after recreate");
+    }
+    ESP_LOGI(TAG, "Front VL53L0X recreated on I2C bus");
+    return true;
+}
+
+bool TofController::HardRecoverSensor() {
+    auto* bus = reinterpret_cast<i2c_master_bus_handle_t>(i2c_bus_);
+    if (bus == nullptr || sensor_ == nullptr) {
+        return false;
+    }
+    ESP_LOGW(TAG, "Hard recover VL53L0X...");
+    if (i2c_master_bus_reset(bus) != ESP_OK) {
+        return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(20));
+    if (ReinitSensor(true)) {
+        return true;
+    }
+    ESP_LOGW(TAG, "Soft reinit failed — recreating sensor handle");
+    return RecreateFrontSensor();
+}
+
+bool TofController::RecoverBus(const char* reason) {
+    if (i2c_bus_ == nullptr || sensor_ == nullptr) {
+        return false;
+    }
+    const int64_t now_ms = esp_timer_get_time() / 1000;
+    if (now_ms - last_bus_recover_ms_ < 3000) {
+        return false;
+    }
+    last_bus_recover_ms_ = now_ms;
+    io_busy_ = true;
+    ESP_LOGW(TAG, "Recovering I2C bus: %s", reason ? reason : "measure_failed");
+    const bool ok = HardRecoverSensor();
+    io_busy_ = false;
+    if (!ok) {
+        ESP_LOGE(TAG, "Hard recover failed");
+        return false;
+    }
+    consecutive_measure_failures_ = 0;
+    vl53l0x_data_t probe = {};
+    auto* sensor = reinterpret_cast<vl53l0x_handle_t>(sensor_);
+    if (vl53l0x_single_measure(sensor, &probe) == ESP_OK) {
+        ESP_LOGI(TAG, "Recovered: dist=%u mm valid=%d status=%u", probe.distance_mm, probe.valid,
+                 probe.range_status);
+    } else {
+        ESP_LOGW(TAG, "Recovered init OK but probe measure failed");
+    }
+    return true;
+}
+
 bool TofController::Measure(vl53l0x_data_t* out) {
-    if (!out || !ready_) {
+    if (!out || !ready_ || io_busy_) {
         return false;
     }
     std::lock_guard<std::mutex> lock(mutex_);
     auto* sensor = reinterpret_cast<vl53l0x_handle_t>(sensor_);
-    return vl53l0x_single_measure(sensor, out) == ESP_OK;
+    if (vl53l0x_single_measure(sensor, out) == ESP_OK) {
+        consecutive_measure_failures_ = 0;
+        return true;
+    }
+    consecutive_measure_failures_++;
+    if (consecutive_measure_failures_ >= 3) {
+        RecoverBus("consecutive_measure_failures");
+    }
+    return false;
 }
 
 bool TofController::MeasureRear(vl53l0x_data_t* out) {
@@ -356,15 +500,43 @@ std::string TofController::Calibrate(int distance_mm) {
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
+    io_busy_ = true;
     auto* sensor = reinterpret_cast<vl53l0x_handle_t>(sensor_);
 
-    ESP_LOGI(TAG, "=== CALIBRATE: place flat target at %d mm, hold still ===", distance_mm);
+    ESP_LOGI(TAG, "=== CALIBRATE: target %d mm — robot still, NO TTS/speaker ===", distance_mm);
+
+    vl53l0x_data_t probe = {};
+    if (vl53l0x_single_measure(sensor, &probe) == ESP_OK && probe.valid) {
+        const int reading = static_cast<int>(probe.distance_mm);
+        const int tol_mm = (distance_mm * 35 / 100) > 50 ? (distance_mm * 35 / 100) : 50;
+        if (AbsDeltaInt(reading, distance_mm) > tol_mm) {
+            ESP_LOGW(TAG, "Calibrate rejected: reading=%d mm, distance_mm=%d (tol ±%d)", reading,
+                     distance_mm, tol_mm);
+            io_busy_ = false;
+            char detail[96];
+            snprintf(detail, sizeof(detail), "distance_mismatch:reading_%d", reading);
+            return JsonCalResult(false, distance_mm, 0, detail);
+        }
+        ESP_LOGI(TAG, "Precheck OK: reading=%d mm matches target %d mm", reading, distance_mm);
+    }
+
+    auto fail = [&](const char* detail) -> std::string {
+        ESP_LOGE(TAG, "Calibrate failed: %s — hard recover sensor", detail);
+        if (!HardRecoverSensor()) {
+            ESP_LOGE(TAG, "Hard recover after failed calibrate also failed — reboot ESP");
+        }
+        io_busy_ = false;
+        return JsonCalResult(false, distance_mm, 0, detail);
+    };
+
+    TryAbortMeasurement(sensor);
+    vTaskDelay(pdMS_TO_TICKS(30));
 
     vl53l0x_ref_calibration_t ref = {};
     esp_err_t err = vl53l0x_perform_ref_calibration(sensor, &ref);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "ref_calibration failed: %s", esp_err_to_name(err));
-        return JsonCalResult(false, distance_mm, 0, "ref_calibration_failed");
+        return fail("ref_calibration_failed");
     }
     ref_vhv_ = ref.vhv_settings;
     ref_phase_ = ref.phase_cal;
@@ -374,7 +546,7 @@ std::string TofController::Calibrate(int distance_mm) {
     err = vl53l0x_perform_offset_calibration(sensor, static_cast<float>(distance_mm), &offset_um);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "offset_calibration failed: %s", esp_err_to_name(err));
-        return JsonCalResult(false, distance_mm, 0, "offset_calibration_failed");
+        return fail("offset_calibration_failed");
     }
     offset_um_ = offset_um;
     cal_distance_mm_ = distance_mm;
@@ -399,6 +571,21 @@ std::string TofController::Calibrate(int distance_mm) {
                  verify.valid, verify.range_status, vl53l0x_range_status_str(verify.range_status));
     }
 
+    io_busy_ = false;
     ESP_LOGI(TAG, "=== CALIBRATE DONE saved to NVS ===");
     return JsonCalResult(true, distance_mm, offset_um_, "saved");
+}
+
+bool TofController::ClearCalibration() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Settings settings(NVS_NS, true);
+    settings.SetBool("calibrated", false);
+    calibrated_ = false;
+    offset_um_ = 0;
+    cal_distance_mm_ = 0;
+    ref_vhv_ = 0;
+    ref_phase_ = 0;
+    xtalk_mcps_ = 0.0f;
+    ESP_LOGI(TAG, "Cleared ToF calibration from NVS — guard uses fallback thresholds");
+    return true;
 }

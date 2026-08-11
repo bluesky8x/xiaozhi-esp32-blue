@@ -3,6 +3,11 @@
 #include "settings.h"
 #include "assets/lang_config.h"
 
+#include <sdkconfig.h>
+#if CONFIG_BOARD_TYPE_BLUE_V2
+#include "boards/blue-v2/config.h"
+#endif
+
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <cJSON.h>
@@ -23,6 +28,40 @@
 #include <algorithm>
 
 #define TAG "Ota"
+
+namespace {
+
+bool IsCloudServerUrl(const char* url) {
+    if (url == nullptr || url[0] == '\0') {
+        return false;
+    }
+    return strstr(url, "tenclass.net") != nullptr || strstr(url, "xiaozhi.me") != nullptr;
+}
+
+void ApplyOtaJsonSettings(const char* ns, cJSON* object, bool block_cloud) {
+    if (!cJSON_IsObject(object)) {
+        return;
+    }
+    Settings settings(ns, true);
+    cJSON* item = nullptr;
+    cJSON_ArrayForEach(item, object) {
+        if (cJSON_IsString(item)) {
+            if (block_cloud && IsCloudServerUrl(item->valuestring)) {
+                ESP_LOGW(TAG, "Ignored cloud %s.%s from OTA", ns, item->string);
+                continue;
+            }
+            if (settings.GetString(item->string) != item->valuestring) {
+                settings.SetString(item->string, item->valuestring);
+            }
+        } else if (cJSON_IsNumber(item)) {
+            if (settings.GetInt(item->string) != item->valueint) {
+                settings.SetInt(item->string, item->valueint);
+            }
+        }
+    }
+}
+
+}  // namespace
 
 
 Ota::Ota() {
@@ -46,10 +85,22 @@ Ota::~Ota() {
 std::string Ota::GetCheckVersionUrl() {
     Settings settings("wifi", false);
     std::string url = settings.GetString("ota_url");
+#if CONFIG_BOARD_TYPE_BLUE_V2 && BLUE_V2_BLOCK_CLOUD_SERVERS
+    if (url.empty()) {
+        ESP_LOGE(TAG, "OTA URL not set — configure in WiFi portal (Advanced)");
+        return "";
+    }
+    if (IsCloudServerUrl(url.c_str())) {
+        ESP_LOGE(TAG, "Cloud OTA URL blocked — set your server in WiFi portal");
+        return "";
+    }
+    return url;
+#else
     if (url.empty()) {
         url = CONFIG_OTA_URL;
     }
     return url;
+#endif
 }
 
 std::unique_ptr<Http> Ota::SetupHttp() {
@@ -144,43 +195,31 @@ esp_err_t Ota::CheckVersion() {
     }
 
     has_mqtt_config_ = false;
-    cJSON *mqtt = cJSON_GetObjectItem(root, "mqtt");
+#if CONFIG_BOARD_TYPE_BLUE_V2 && BLUE_V2_BLOCK_CLOUD_SERVERS
+    // Blue V2: websocket from your OTA server only — never MQTT to xiaozhi cloud.
+#else
+    cJSON* mqtt = cJSON_GetObjectItem(root, "mqtt");
     if (cJSON_IsObject(mqtt)) {
-        Settings settings("mqtt", true);
-        cJSON *item = NULL;
-        cJSON_ArrayForEach(item, mqtt) {
-            if (cJSON_IsString(item)) {
-                if (settings.GetString(item->string) != item->valuestring) {
-                    settings.SetString(item->string, item->valuestring);
-                }
-            } else if (cJSON_IsNumber(item)) {
-                if (settings.GetInt(item->string) != item->valueint) {
-                    settings.SetInt(item->string, item->valueint);
-                }
-            }
+        ApplyOtaJsonSettings("mqtt", mqtt, true);
+        Settings mqtt_settings("mqtt", false);
+        if (!mqtt_settings.GetString("endpoint").empty() &&
+            !IsCloudServerUrl(mqtt_settings.GetString("endpoint").c_str())) {
+            has_mqtt_config_ = true;
         }
-        has_mqtt_config_ = true;
     } else {
         ESP_LOGI(TAG, "No mqtt section found !");
     }
+#endif
 
     has_websocket_config_ = false;
-    cJSON *websocket = cJSON_GetObjectItem(root, "websocket");
+    cJSON* websocket = cJSON_GetObjectItem(root, "websocket");
     if (cJSON_IsObject(websocket)) {
-        Settings settings("websocket", true);
-        cJSON *item = NULL;
-        cJSON_ArrayForEach(item, websocket) {
-            if (cJSON_IsString(item)) {
-                if (settings.GetString(item->string) != item->valuestring) {
-                    settings.SetString(item->string, item->valuestring);
-                }
-            } else if (cJSON_IsNumber(item)) {
-                if (settings.GetInt(item->string) != item->valueint) {
-                    settings.SetInt(item->string, item->valueint);
-                }
-            }
+        ApplyOtaJsonSettings("websocket", websocket, true);
+        Settings ws_settings("websocket", false);
+        const std::string ws_url = ws_settings.GetString("url");
+        if (!ws_url.empty() && !IsCloudServerUrl(ws_url.c_str())) {
+            has_websocket_config_ = true;
         }
-        has_websocket_config_ = true;
     } else {
         ESP_LOGI(TAG, "No websocket section found!");
     }
@@ -219,10 +258,14 @@ esp_err_t Ota::CheckVersion() {
         }
         cJSON *url = cJSON_GetObjectItem(firmware, "url");
         if (cJSON_IsString(url)) {
-            firmware_url_ = url->valuestring;
+            if (IsCloudServerUrl(url->valuestring)) {
+                ESP_LOGW(TAG, "Blocked cloud firmware URL from OTA response");
+            } else {
+                firmware_url_ = url->valuestring;
+            }
         }
 
-        if (cJSON_IsString(version) && cJSON_IsString(url)) {
+        if (cJSON_IsString(version) && !firmware_url_.empty()) {
             // Check if the version is newer, for example, 0.1.0 is newer than 0.0.1
             has_new_version_ = IsNewVersionAvailable(current_version_, firmware_version_);
             if (has_new_version_) {

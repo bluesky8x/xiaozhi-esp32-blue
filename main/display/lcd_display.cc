@@ -78,7 +78,12 @@ LcdDisplay::LcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_
 
     // Load theme from settings
     Settings settings("display", false);
+#if CONFIG_BOARD_TYPE_BLUE_V2 || CONFIG_BOARD_TYPE_BLUE_V4
+    // ST7789 on Blue V2/V4 uses INVERT_COLOR: light theme LVGL bg=white → panel looks black.
     std::string theme_name = settings.GetString("theme", "light");
+#else
+    std::string theme_name = settings.GetString("theme", "light");
+#endif
     current_theme_ = LvglThemeManager::GetInstance().GetTheme(theme_name);
 
     // Create a timer to hide the preview image
@@ -100,8 +105,14 @@ SpiLcdDisplay::SpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
                              int width, int height, int offset_x, int offset_y, bool mirror_x,
                              bool mirror_y, bool swap_xy)
     : LcdDisplay(panel_io, panel, width, height) {
-    // draw white
-    std::vector<uint16_t> buffer(width_, 0xFFFF);
+    // Clear panel before LVGL (Blue V2: INVERT_COLOR=true → send 0x0000 for white on panel)
+#if defined(CONFIG_BOARD_TYPE_BLUE_V2) || defined(CONFIG_BOARD_TYPE_BLUE_V3) || \
+    defined(CONFIG_BOARD_TYPE_BLUE_V4)
+    const uint16_t prefill = 0x0000;
+#else
+    const uint16_t prefill = 0x0000;
+#endif
+    std::vector<uint16_t> buffer(width_, prefill);
     for (int y = 0; y < height_; y++) {
         esp_lcd_panel_draw_bitmap(panel_, 0, y, width_, y + 1, buffer.data());
     }
@@ -141,11 +152,28 @@ SpiLcdDisplay::SpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
     lvgl_port_init(&port_cfg);
 
     ESP_LOGI(TAG, "Adding LCD display");
+#if defined(CONFIG_BOARD_TYPE_BLUE_V2) || defined(CONFIG_BOARD_TYPE_BLUE_V3) || \
+    defined(CONFIG_BOARD_TYPE_BLUE_V4)
+    // Partial refresh + internal DMA buffer. Full PSRAM frame (115200 B) exhausts SPI DMA priv
+    // buffers once WiFi/HTTP starts → draw_bitmap fails → LVGL stuck in wait_for_flushing (WDT).
+    const uint32_t lv_buffer_size =
+        static_cast<uint32_t>(width_ * DISPLAY_LVGL_BUFFER_LINES);
+    const bool lv_full_refresh = false;
+    const bool lv_buff_dma = true;
+    const bool lv_buff_spiram = false;
+    ESP_LOGI(TAG, "Blue V2/V3/V4: LVGL partial buffer %u lines (%u bytes, DMA SRAM)",
+             static_cast<unsigned>(DISPLAY_LVGL_BUFFER_LINES), lv_buffer_size * 2);
+#else
+    const uint32_t lv_buffer_size = static_cast<uint32_t>(width_ * 20);
+    const bool lv_full_refresh = false;
+    const bool lv_buff_dma = true;
+    const bool lv_buff_spiram = false;
+#endif
     const lvgl_port_display_cfg_t display_cfg = {
         .io_handle = panel_io_,
         .panel_handle = panel_,
         .control_handle = nullptr,
-        .buffer_size = static_cast<uint32_t>(width_ * 20),
+        .buffer_size = lv_buffer_size,
         .double_buffer = false,
         .trans_size = 0,
         .hres = static_cast<uint32_t>(width_),
@@ -160,11 +188,11 @@ SpiLcdDisplay::SpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
         .color_format = LV_COLOR_FORMAT_RGB565,
         .flags =
             {
-                .buff_dma = 1,
-                .buff_spiram = 0,
+                .buff_dma = lv_buff_dma,
+                .buff_spiram = lv_buff_spiram,
                 .sw_rotate = 0,
                 .swap_bytes = 1,
-                .full_refresh = 0,
+                .full_refresh = lv_full_refresh,
                 .direct_mode = 0,
             },
     };
@@ -1162,6 +1190,14 @@ void LcdDisplay::SetEmotion(const char* emotion) {
         } else {
             ESP_LOGE(TAG, "Failed to load GIF for emotion: %s", emotion);
             gif_controller_.reset();
+            lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
+            if (emoji_label_ != nullptr) {
+                auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
+                lv_obj_set_style_text_font(emoji_label_, lvgl_theme->large_icon_font()->font(), 0);
+                lv_obj_set_style_text_color(emoji_label_, lvgl_theme->text_color(), 0);
+                lv_label_set_text(emoji_label_, MATERIAL_SYMBOLS_ROBOT_2);
+                lv_obj_remove_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
+            }
         }
     } else {
         lv_image_set_src(emoji_image_, image->image_dsc());
@@ -1327,6 +1363,12 @@ void LcdDisplay::SetTheme(Theme* theme) {
 
     // No errors occurred. Save theme to settings
     Display::SetTheme(lvgl_theme);
+
+    // Theme/asset reload does not restart animated emoji; force a full redraw.
+    lv_obj_invalidate(screen);
+    if (gif_controller_) {
+        gif_controller_->Start();
+    }
 }
 
 void LcdDisplay::SetHideSubtitle(bool hide) {
@@ -1345,5 +1387,33 @@ void LcdDisplay::SetHideSubtitle(bool hide) {
                 lv_obj_remove_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);
             }
         }
+    }
+}
+
+void LcdDisplay::RefreshNow() {
+    DisplayLockGuard lock(this);
+    lv_obj_t* screen = lv_screen_active();
+    if (screen != nullptr) {
+        lv_obj_invalidate(screen);
+    }
+    lv_display_t* disp = lv_display_get_default();
+    if (disp != nullptr) {
+        lv_refr_now(disp);
+    }
+}
+
+void LcdDisplay::RecoverPanel() {
+    if (panel_ == nullptr) {
+        return;
+    }
+    DisplayLockGuard lock(this);
+    if (gif_controller_) {
+        gif_controller_->Stop();
+    }
+    esp_lcd_panel_reset(panel_);
+    esp_lcd_panel_disp_on_off(panel_, true);
+    lv_obj_t* screen = lv_screen_active();
+    if (screen != nullptr) {
+        lv_obj_invalidate(screen);
     }
 }

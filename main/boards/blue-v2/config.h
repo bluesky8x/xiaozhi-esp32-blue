@@ -61,9 +61,15 @@
 #define BLUE_V2_OTTO_AUDIO_ENABLE 1
 // Requires BLUE_V2_OTTO_LCD_ONLY=1. Registers self.motor.* / self.chassis.* MCP tools.
 #define BLUE_V2_OTTO_MOTOR_ENABLE 1
+// Requires BLUE_V2_OTTO_LCD_ONLY=1. VL53L0X on I2C 41/42 + self.tof.* MCP; guard needs motor.
+#define BLUE_V2_OTTO_TOF_ENABLE     1
 
 // 1 = TTP223 on GPIO 16 — toggle chat (same as BOOT). Works without wake word.
 #define BLUE_V2_OTTO_TOUCH_ENABLE 1
+#define BLUE_V2_OTTO_TOUCH_ENABLE 1
+
+// 1 = OTA URL from WiFi portal only; block tenclass.net / xiaozhi.me fallback (no cloud Chinese TTS).
+#define BLUE_V2_BLOCK_CLOUD_SERVERS 1
 
 #if BLUE_V2_OTTO_LCD_ONLY && BLUE_V2_OTTO_AUDIO_ENABLE
 #define BLUE_V2_OTTO_DEFER_HEAVY 1
@@ -97,9 +103,9 @@
 // Mic level debug on serial (~1 Hz): peak/RMS while I2S input active (Blue V2 bring-up).
 #define AUDIO_MIC_DEBUG_LOG         1
 
-// ToF not wired — set NC to skip I2C init (re-enable 41/42 when sensor is installed).
-#define I2C_SENSOR_SDA_PIN GPIO_NUM_NC
-#define I2C_SENSOR_SCL_PIN GPIO_NUM_NC
+// VL53L0X front sensor (set NC to skip I2C init).
+#define I2C_SENSOR_SDA_PIN GPIO_NUM_41
+#define I2C_SENSOR_SCL_PIN GPIO_NUM_42
 #define TOF_FRONT_XSHUT_GPIO GPIO_NUM_NC   // single sensor: tie XSHUT → 3.3 V; dual: use GPIO 1 / 2
 #define TOF_REAR_XSHUT_GPIO  GPIO_NUM_2
 #define TOF_FRONT_I2C_ADDR   0x29

@@ -164,8 +164,9 @@ public:
 
         mcp_server.AddTool(
             "self.motor.move",
-            "Drive with per-wheel speed. left/right range -100 (full reverse) to 100 (full forward). "
-            "duration_ms: auto-stop timeout (100-10000).",
+            "Drive straight or custom wheel speeds. left=100 right=100 = forward straight. "
+            "For đi vòng vòng / circle use self.motor.circle instead (NOT 100,100). "
+            "left/right range -100 to 100. duration_ms auto-stop (100-10000).",
             PropertyList({Property("left", kPropertyTypeInteger, 0, -100, 100),
                           Property("right", kPropertyTypeInteger, 0, -100, 100),
                           Property("duration_ms", kPropertyTypeInteger, MOTOR_AUTO_STOP_MS, 100, 10000)}),
@@ -174,6 +175,17 @@ public:
                 const int right = properties["right"].value<int>();
                 const int duration_ms = properties["duration_ms"].value<int>();
                 Move(left, right, duration_ms);
+                return true;
+            });
+
+        mcp_server.AddTool(
+            "self.motor.circle",
+            "Drive in a circle (left wheel slower). Use for: đi vòng vòng, quay vòng, đi khám phá. "
+            "duration_ms auto-stop (1000-30000).",
+            PropertyList({Property("duration_ms", kPropertyTypeInteger, MOTOR_AUTO_STOP_MS, 1000, 30000)}),
+            [this](const PropertyList& properties) -> ReturnValue {
+                const int duration_ms = properties["duration_ms"].value<int>();
+                Move(50, 100, duration_ms);
                 return true;
             });
 

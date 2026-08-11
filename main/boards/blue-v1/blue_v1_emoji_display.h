@@ -4,6 +4,8 @@
 
 #include "display/lcd_display.h"
 
+#include <sdkconfig.h>
+
 /**
  * Blue V1 — Otto GIF face on ST7789 240×240.
  * Emotions follow device state; LLM emotions (non-neutral) override until next state change.
@@ -19,6 +21,10 @@ public:
     void SetupUI() override;
     void SetStatus(const char* status) override;
     void SetEmotion(const char* emotion) override;
+#if CONFIG_BOARD_TYPE_BLUE_V2
+    void SetTheme(Theme* theme) override;
+    void SetChatMessage(const char* role, const char* content) override;
+#endif
 
 private:
     std::string current_status_;
@@ -26,4 +32,9 @@ private:
 
     void ApplyStateEmotion();
     static const char* EmotionForStatus(const char* status);
+#if CONFIG_BOARD_TYPE_BLUE_V2
+    void ApplyInvertSafeChrome();
+    void ShowIconEmotion(const char* emotion);
+    void EnsureEmotionVisible();
+#endif
 };

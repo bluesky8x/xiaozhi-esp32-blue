@@ -1,11 +1,70 @@
 #include "no_audio_codec.h"
 
 #include <esp_log.h>
+#include <esp_timer.h>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 
+#ifndef AUDIO_MIC_DEBUG_LOG
+#define AUDIO_MIC_DEBUG_LOG 0
+#endif
+
+#ifndef AUDIO_MIC_SHIFT_BITS
+#define AUDIO_MIC_SHIFT_BITS 12
+#endif
+
 #define TAG "NoAudioCodec"
+
+namespace {
+
+void ApplyInputGain(int16_t* dest, int samples, float gain) {
+    if (samples <= 0 || gain <= 0.0f || gain == 1.0f) {
+        return;
+    }
+    for (int i = 0; i < samples; i++) {
+        const float amplified = static_cast<float>(dest[i]) * gain;
+        dest[i] = (amplified > INT16_MAX)   ? INT16_MAX
+                  : (amplified < -INT16_MAX) ? static_cast<int16_t>(-INT16_MAX)
+                                             : static_cast<int16_t>(amplified);
+    }
+}
+
+#if AUDIO_MIC_DEBUG_LOG
+void LogMicLevels(int samples, int32_t raw_peak, int32_t pre_gain_peak, int32_t post_gain_peak, float gain,
+                  bool read_failed) {
+    static int64_t last_log_us = 0;
+    const int64_t now_us = esp_timer_get_time();
+    if (now_us - last_log_us < 1000000) {
+        return;
+    }
+    last_log_us = now_us;
+
+    if (read_failed || samples <= 0) {
+        ESP_LOGW(TAG,
+                 "Mic: I2S read failed or 0 samples (duplex needs TX clock; check INMP441 WS/BCLK/SD, L/R=GND)");
+        return;
+    }
+
+    const char* hint = "OK";
+    if (post_gain_peak >= 32000 || pre_gain_peak >= 32000) {
+        if (gain > 1.0f) {
+            hint = "CLIPPING — lower AUDIO_MIC_INPUT_GAIN";
+        } else {
+            hint = "HOT — TTS echo/noise; shift++ or half-duplex";
+        }
+    } else if (pre_gain_peak < 200) {
+        hint = "SILENT — wiring/L/R?";
+    } else if (pre_gain_peak < 1500) {
+        hint = "weak — raise gain slightly";
+    }
+
+    ESP_LOGI(TAG, "Mic: raw=%ld pre=%ld post=%ld gain=%.1f (%s)", static_cast<long>(raw_peak),
+             static_cast<long>(pre_gain_peak), static_cast<long>(post_gain_peak), gain, hint);
+}
+#endif
+
+}  // namespace
 
 NoAudioCodec::~NoAudioCodec() {
     if (rx_handle_ != nullptr) {
@@ -243,15 +302,55 @@ int NoAudioCodec::Read(int16_t* dest, int samples) {
     constexpr uint32_t kReadTimeoutMs = 200;
 
     std::vector<int32_t> bit32_buffer(samples);
-    if (i2s_channel_read(rx_handle_, bit32_buffer.data(), samples * sizeof(int32_t), &bytes_read, kReadTimeoutMs) != ESP_OK) {
+    const bool read_ok =
+        i2s_channel_read(rx_handle_, bit32_buffer.data(), samples * sizeof(int32_t), &bytes_read,
+                         kReadTimeoutMs) == ESP_OK;
+
+#if AUDIO_MIC_DEBUG_LOG
+    if (!read_ok) {
+        LogMicLevels(0, 0, 0, 0, input_gain_, true);
         return 0;
     }
+#else
+    if (!read_ok) {
+        return 0;
+    }
+#endif
 
     samples = bytes_read / sizeof(int32_t);
+#if AUDIO_MIC_DEBUG_LOG
+    int32_t raw_peak = 0;
+    int32_t pre_gain_peak = 0;
+#endif
     for (int i = 0; i < samples; i++) {
-        int32_t value = bit32_buffer[i] >> 12;
+#if AUDIO_MIC_DEBUG_LOG
+        const int32_t raw_abs =
+            bit32_buffer[i] >= 0 ? bit32_buffer[i] : -bit32_buffer[i];
+        if (raw_abs > raw_peak) {
+            raw_peak = raw_abs;
+        }
+#endif
+        int32_t value = bit32_buffer[i] >> AUDIO_MIC_SHIFT_BITS;
         dest[i] = (value > INT16_MAX) ? INT16_MAX : (value < -INT16_MAX) ? -INT16_MAX : (int16_t)value;
+#if AUDIO_MIC_DEBUG_LOG
+        const int32_t pcm_abs = dest[i] >= 0 ? dest[i] : -dest[i];
+        if (pcm_abs > pre_gain_peak) {
+            pre_gain_peak = pcm_abs;
+        }
+#endif
     }
+
+    ApplyInputGain(dest, samples, input_gain_);
+#if AUDIO_MIC_DEBUG_LOG
+    int32_t post_gain_peak = 0;
+    for (int i = 0; i < samples; i++) {
+        const int32_t pcm_abs = dest[i] >= 0 ? dest[i] : -dest[i];
+        if (pcm_abs > post_gain_peak) {
+            post_gain_peak = pcm_abs;
+        }
+    }
+    LogMicLevels(samples, raw_peak, pre_gain_peak, post_gain_peak, input_gain_, false);
+#endif
     return samples;
 }
 
@@ -261,6 +360,12 @@ void NoAudioCodec::EnableInput(bool enable) {
         return;
     }
     if (enable) {
+        // INMP441 + MAX98357 on shared WS/BCLK: ESP32 master must enable TX for clock.
+        if (duplex_ && !output_enabled_) {
+            ESP_ERROR_CHECK(i2s_channel_enable(tx_handle_));
+            output_enabled_ = true;
+            ESP_LOGI(TAG, "Duplex: enabled TX for shared I2S clock (mic RX)");
+        }
         ESP_ERROR_CHECK(i2s_channel_enable(rx_handle_));
     } else {
         ESP_ERROR_CHECK(i2s_channel_disable(rx_handle_));
@@ -375,12 +480,6 @@ int NoAudioCodecSimplexPdm::Read(int16_t* dest, int samples) {
     }
 
     samples = bytes_read / sizeof(int16_t);
-    if (input_gain_ > 0) {
-        int gain_factor = (int)input_gain_;
-        for (int i = 0; i < samples; i++) {
-            int32_t amplified = dest[i] * gain_factor;
-            dest[i] = (amplified > INT16_MAX) ? INT16_MAX : (amplified < -INT16_MAX) ? -INT16_MAX : (int16_t)amplified;
-        }
-    }
+    ApplyInputGain(dest, samples, input_gain_);
     return samples;
 }

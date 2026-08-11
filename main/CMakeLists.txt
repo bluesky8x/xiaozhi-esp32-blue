@@ -104,6 +104,15 @@ elseif(CONFIG_BOARD_TYPE_BLUE_V2)
     set(BUILTIN_TEXT_FONT font_noto_sans_basic_16_4)
     set(BUILTIN_ICON_FONT font_material_symbols_16_4)
     set(DEFAULT_EMOJI_COLLECTION otto-gif)
+elseif(CONFIG_BOARD_TYPE_BLUE_V3)
+    set(BOARD_DIR "blue-v3")
+    set(BUILTIN_TEXT_FONT font_noto_sans_basic_16_4)
+    set(BUILTIN_ICON_FONT font_material_symbols_16_4)
+elseif(CONFIG_BOARD_TYPE_BLUE_V4)
+    set(BOARD_DIR "blue-v4")
+    set(BUILTIN_TEXT_FONT font_noto_sans_basic_16_4)
+    set(BUILTIN_ICON_FONT font_material_symbols_16_4)
+    set(DEFAULT_EMOJI_COLLECTION otto-gif)
 elseif(CONFIG_BOARD_TYPE_BREAD_COMPACT_ML307)
     set(BOARD_DIR "bread-compact-ml307")
     set(BUILTIN_TEXT_FONT font_noto_sans_basic_14_1)
@@ -881,8 +890,18 @@ file(GLOB BOARD_SOURCES
 )
 if(CONFIG_BOARD_TYPE_BLUE_V2)
     list(APPEND BOARD_SOURCES
+        ${CMAKE_CURRENT_SOURCE_DIR}/boards/blue-v3/blue_v3_test_display.cc
         ${CMAKE_CURRENT_SOURCE_DIR}/boards/blue-v1/blue_v1_emoji_display.cc
-        ${CMAKE_CURRENT_SOURCE_DIR}/boards/blue-v1/otto_icon_font.c)
+        ${CMAKE_CURRENT_SOURCE_DIR}/boards/otto-robot/otto_emoji_display.cc
+        ${CMAKE_CURRENT_SOURCE_DIR}/boards/otto-robot/otto_icon_font.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/boards/blue-v2/blue_v2_otto_display.cc)
+endif()
+if(CONFIG_BOARD_TYPE_BLUE_V4)
+    list(APPEND BOARD_SOURCES
+        ${CMAKE_CURRENT_SOURCE_DIR}/boards/otto-robot/otto_emoji_display.cc
+        ${CMAKE_CURRENT_SOURCE_DIR}/boards/otto-robot/otto_icon_font.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/boards/blue-v2/tof_controller.cc
+        ${CMAKE_CURRENT_SOURCE_DIR}/boards/blue-v2/tof_motor_guard.cc)
 endif()
 list(APPEND SOURCES ${BOARD_SOURCES})
 
@@ -1063,6 +1082,11 @@ if(CONFIG_BOARD_TYPE_ESP32_P4_FUNCTION_EV_BOARD)
         sdmmc
     )
 endif()
+if(CONFIG_BOARD_TYPE_BLUE_V2 OR CONFIG_BOARD_TYPE_BLUE_V4)
+    list(APPEND MAIN_PRIV_REQUIRES_EXTRA
+        pkolt__vl53l0x
+    )
+endif()
 idf_component_register(SRCS ${SOURCES}
                     EMBED_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS}
                     INCLUDE_DIRS ${INCLUDE_DIRS}
@@ -1116,6 +1140,19 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
                         PRIVATE BUILTIN_TEXT_FONT=${BUILTIN_TEXT_FONT} BUILTIN_ICON_FONT=${BUILTIN_ICON_FONT}
                         PRIVATE TEXT_FONT_SIZE=${TEXT_FONT_SIZE} TEXT_FONT_BPP=${TEXT_FONT_BPP}
                         )
+    if(CONFIG_BOARD_TYPE_BLUE_V2)
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE AUDIO_MIC_DEBUG_LOG=1)
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE AUDIO_MIC_SHIFT_BITS=13)
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE DISPLAY_LVGL_BUFFER_LINES=80)
+    endif()
+    if(CONFIG_BOARD_TYPE_BLUE_V4)
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE AUDIO_MIC_DEBUG_LOG=1)
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE AUDIO_MIC_SHIFT_BITS=13)
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE DISPLAY_LVGL_BUFFER_LINES=80)
+    endif()
+    if(CONFIG_BOARD_TYPE_BLUE_V3)
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE DISPLAY_LVGL_BUFFER_LINES=80)
+    endif()
 endif()
 
 # Add generation rules

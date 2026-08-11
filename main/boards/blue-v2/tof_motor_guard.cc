@@ -128,11 +128,22 @@ StopReason CheckFrontCalibrated(const vl53l0x_data_t& sample, int cal_mm, uint16
         return StopReason::None;
     }
 
+#if TOF_OBSTACLE_GUARD_ENABLE
+    // Very close but invalid (min range / signal fail) — treat as obstacle while moving.
+    if (sample.distance_mm > 0 && sample.distance_mm < near_limit) {
+        return StopReason::Obstacle;
+    }
+    if (prev_valid && static_cast<int>(prev_dist) >= near_limit) {
+        return StopReason::Obstacle;
+    }
+#endif
+
 #if TOF_CLIFF_GUARD_ENABLE
     if (prev_valid && AbsDelta(static_cast<int>(prev_dist), cal_mm) <= FarLimit(cal_mm)) {
         return StopReason::CliffLostSignal;
     }
-    if (sample.distance_mm >= TOF_MAX_VALID_MM || sample.distance_mm >= 8000) {
+    // 8191 + valid=0 is VL53 error sentinel (I2C/vibration) — not a real cliff.
+    if (sample.valid && sample.distance_mm >= TOF_MAX_VALID_MM) {
         return StopReason::CliffFar;
     }
 #else
@@ -163,7 +174,7 @@ StopReason CheckFrontFallback(const vl53l0x_data_t& sample) {
     }
 
 #if TOF_CLIFF_GUARD_ENABLE
-    if (sample.distance_mm >= TOF_MAX_VALID_MM || sample.distance_mm >= 8000) {
+    if (sample.valid && sample.distance_mm >= TOF_MAX_VALID_MM) {
         return StopReason::CliffFar;
     }
 #endif
@@ -233,6 +244,7 @@ void TofMotorGuard::PollOnce() {
     int64_t last_signal_fail_warn_ms = 0;
     uint16_t prev_front_dist = 0;
     bool prev_front_valid = false;
+    int forward_measure_fail_streak = 0;
 
     while (true) {
         const bool moving_forward = active_ && motor_ != nullptr && motor_->IsMovingForward();
@@ -246,6 +258,7 @@ void TofMotorGuard::PollOnce() {
             last_debug_log_ms = 0;
             prev_front_dist = 0;
             prev_front_valid = false;
+            forward_measure_fail_streak = 0;
         }
 
         const int64_t now_ms = esp_timer_get_time() / 1000;
@@ -254,7 +267,7 @@ void TofMotorGuard::PollOnce() {
         const bool should_measure =
             moving_forward || (TOF_DEBUG_LOG && (now_ms - last_debug_log_ms >= debug_interval_ms));
 
-        if (active_ && should_measure) {
+        if (active_ && should_measure && !tof.IsIoBusy()) {
             vl53l0x_data_t front = {};
             const bool front_ok = tof.MeasureFront(&front);
 
@@ -265,34 +278,45 @@ void TofMotorGuard::PollOnce() {
             }
 
             if (!front_ok) {
-                ESP_LOGW(TAG, "Front measure failed (forward=%d)", moving_forward);
-            } else if (TOF_DEBUG_LOG && (now_ms - last_debug_log_ms >= debug_interval_ms)) {
-                if (front.valid || (now_ms - last_signal_fail_warn_ms >= 5000)) {
-                    LogFrontSample(moving_forward ? "Move" : "Idle", front, cal_mm, use_cal);
-                    if (rear_ok && tof.HasRearSensor()) {
-                        LogRearSample(moving_forward ? "Move" : "Idle", rear);
-                    }
+                if (moving_forward) {
+                    forward_measure_fail_streak++;
+                }
+                if (now_ms - last_debug_log_ms >= debug_interval_ms) {
+                    ESP_LOGW(TAG, "Front measure failed (forward=%d streak=%d)", moving_forward,
+                             forward_measure_fail_streak);
                     last_debug_log_ms = now_ms;
-                    if (!front.valid) {
-                        last_signal_fail_warn_ms = now_ms;
+                }
+            } else {
+                forward_measure_fail_streak = 0;
+                if (TOF_DEBUG_LOG && (now_ms - last_debug_log_ms >= debug_interval_ms)) {
+                    if (front.valid || (now_ms - last_signal_fail_warn_ms >= 5000)) {
+                        LogFrontSample(moving_forward ? "Move" : "Idle", front, cal_mm, use_cal);
+                        if (rear_ok && tof.HasRearSensor()) {
+                            LogRearSample(moving_forward ? "Move" : "Idle", rear);
+                        }
+                        last_debug_log_ms = now_ms;
+                        if (!front.valid) {
+                            last_signal_fail_warn_ms = now_ms;
+                        }
                     }
                 }
             }
 
             if (moving_forward) {
                 StopReason reason = StopReason::None;
-                if (front_ok) {
+                if (front_ok && SampleUsable(front)) {
                     if (use_cal && cal_mm > 0) {
                         reason = CheckFrontCalibrated(front, cal_mm, prev_front_dist, prev_front_valid);
                     } else {
                         reason = CheckFrontFallback(front);
                     }
-                    if (SampleUsable(front)) {
-                        prev_front_dist = front.distance_mm;
-                        prev_front_valid = true;
-                    } else if (reason == StopReason::None) {
-                        prev_front_valid = false;
-                    }
+                    prev_front_dist = front.distance_mm;
+                    prev_front_valid = true;
+                } else if (front_ok) {
+                    // Measure OK at API level but invalid sample (8191/signal fail) — ignore for stop.
+                    forward_measure_fail_streak++;
+                } else if (forward_measure_fail_streak >= 3) {
+                    reason = StopReason::Obstacle;
                 }
                 if (reason == StopReason::None && tof.HasRearSensor() && rear_ok) {
                     reason = CheckRearWhileMoving(rear);
@@ -305,6 +329,7 @@ void TofMotorGuard::PollOnce() {
                     was_moving_forward = false;
                     prev_front_dist = 0;
                     prev_front_valid = false;
+                    forward_measure_fail_streak = 0;
                 }
             }
         }

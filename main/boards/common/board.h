@@ -82,6 +82,12 @@ public:
     virtual void SetPowerSaveLevel(PowerSaveLevel level) = 0;
     virtual std::string GetBoardJson() = 0;
     virtual std::string GetDeviceStatusJson() = 0;
+    /** Called after display SetupUI + first RefreshNow (defer motor/peripherals that affect SPI). */
+    virtual void OnApplicationDisplayReady() {}
+    /** Called after motor LEDC is first enabled (can disturb ST7789 SPI — refresh face). */
+    virtual void OnMotorPwmReady() {}
+    /** Pre-init motor LEDC on main thread (optional — bench/robot boards). */
+    virtual void WarmUpMotorPwm() {}
 };
 
 #define DECLARE_BOARD(BOARD_CLASS_NAME) \

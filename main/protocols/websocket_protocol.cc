@@ -10,6 +10,12 @@
 #include <cstring>
 #include "assets/lang_config.h"
 
+#include <sdkconfig.h>
+#if CONFIG_BOARD_TYPE_BLUE_V2
+#include "boards/blue-v2/config.h"
+#include "boards/blue-v2/blue_cloud_guard.h"
+#endif
+
 #define TAG "WS"
 
 WebsocketProtocol::WebsocketProtocol() { event_group_handle_ = xEventGroupCreate(); }
@@ -79,6 +85,13 @@ void WebsocketProtocol::CloseAudioChannel(bool send_goodbye) {
 bool WebsocketProtocol::OpenAudioChannel() {
     Settings settings("websocket", false);
     std::string url = settings.GetString("url");
+#if CONFIG_BOARD_TYPE_BLUE_V2 && BLUE_V2_BLOCK_CLOUD_SERVERS
+    if (url.empty() || BlueIsCloudServerUrl(url.c_str())) {
+        ESP_LOGE(TAG, "Blocked websocket connect — cloud or missing URL (use WiFi portal OTA)");
+        SetError(Lang::Strings::SERVER_NOT_FOUND);
+        return false;
+    }
+#endif
     std::string token = settings.GetString("token");
     int version = settings.GetInt("version");
     if (version != 0) {

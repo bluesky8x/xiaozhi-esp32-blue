@@ -3,6 +3,7 @@
 
 #include "config.h"
 #include "mcp_server.h"
+#include "application.h"
 
 #include <driver/gpio.h>
 #include <esp_log.h>
@@ -210,6 +211,9 @@ public:
             DriveSide(right_in1_, right_in2_, 0);
         }
         ESP_LOGI(MOTOR_TAG, "Motors stopped");
+#if CONFIG_BOARD_TYPE_BLUE_V2
+        Application::GetInstance().ScheduleListeningResyncAfterRobotAction();
+#endif
     }
 
     bool IsMoving() const { return left_speed_ != 0 || right_speed_ != 0; }

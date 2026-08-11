@@ -35,6 +35,10 @@ public:
     // Thread-safe measure — front sensor (default).
     bool Measure(vl53l0x_data_t* out);
 
+    bool IsIoBusy() const {
+        return io_busy_;
+    }
+
     bool MeasureFront(vl53l0x_data_t* out) {
         return Measure(out);
     }
@@ -44,6 +48,9 @@ public:
     // Run offset calibration at known target distance (mm). Saves result to NVS.
     std::string Calibrate(int distance_mm);
 
+    // Clear saved NVS calibration (guard uses fallback thresholds until recal).
+    bool ClearCalibration();
+
 private:
     TofController() = default;
 
@@ -52,8 +59,12 @@ private:
     bool LoadCalibration();
     bool SaveCalibration();
     bool ApplyStoredCalibration();
-    bool EnsureRefCalibration();
+    bool EnsureRefCalibration(bool force_fresh = false);
     void RegisterMcpTools();
+    bool ReinitSensor(bool force_ref_cal);
+    bool RecreateFrontSensor();
+    bool HardRecoverSensor();
+    bool RecoverBus(const char* reason);
 
     std::mutex mutex_;
     void* i2c_bus_ = nullptr;
@@ -62,6 +73,9 @@ private:
     bool has_rear_ = false;
     bool ready_ = false;
     bool calibrated_ = false;
+    bool io_busy_ = false;
+    int consecutive_measure_failures_ = 0;
+    int64_t last_bus_recover_ms_ = 0;
     int32_t offset_um_ = 0;
     int32_t cal_distance_mm_ = 0;
     uint8_t ref_vhv_ = 0;

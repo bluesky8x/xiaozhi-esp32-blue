@@ -6,6 +6,7 @@
 #include "config.h"
 #include "motor_controller.h"
 #include "lamp_controller.h"
+#include "power_controller.h"
 #include "led/single_led.h"
 #include "system_reset.h"
 #include "power_save_timer.h"
@@ -94,25 +95,55 @@ private:
         power_save_timer_->SetEnabled(true);
     }
 
+    void ResumeMicAfterUserMute() {
+        auto& app = Application::GetInstance();
+        auto& audio_service = app.GetAudioService();
+        auto* codec = GetAudioCodec();
+        const auto state = app.GetDeviceState();
+
+        codec->EnableInput(true);
+        if (codec->duplex()) {
+            codec->EnableOutput(true);
+        }
+
+        if (state == kDeviceStateListening || state == kDeviceStateSpeaking ||
+            state == kDeviceStateConnecting) {
+            audio_service.EnableVoiceProcessing(true);
+        } else {
+            audio_service.EnableWakeWordDetection(true);
+        }
+    }
+
+    void RestoreMicIfMuted() {
+        if (!mic_muted_by_user_) {
+            return;
+        }
+        mic_muted_by_user_ = false;
+        ResumeMicAfterUserMute();
+        if (display_ != nullptr) {
+            display_->ShowNotification("Mic on");
+        }
+        ESP_LOGI(TAG, "Mic restored for chat");
+    }
+
     void ToggleMicMute() {
         mic_muted_by_user_ = !mic_muted_by_user_;
         auto& app = Application::GetInstance();
         auto& audio_service = app.GetAudioService();
-        auto codec = GetAudioCodec();
+        auto* codec = GetAudioCodec();
 
         if (mic_muted_by_user_) {
             audio_service.EnableWakeWordDetection(false);
             audio_service.EnableVoiceProcessing(false);
-            codec->EnableInput(false);
+            if (!codec->duplex()) {
+                codec->EnableInput(false);
+            }
             if (display_ != nullptr) {
                 display_->ShowNotification(Lang::Strings::MUTED);
             }
             ESP_LOGI(TAG, "Mic muted by user");
         } else {
-            codec->EnableInput(true);
-            if (app.GetDeviceState() == kDeviceStateIdle) {
-                audio_service.EnableWakeWordDetection(true);
-            }
+            ResumeMicAfterUserMute();
             if (display_ != nullptr) {
                 display_->ShowNotification("Mic on");
             }
@@ -129,7 +160,10 @@ private:
                 return;
             }
         }
-        ToggleMicMute();
+
+        RestoreMicIfMuted();
+        ESP_LOGI(TAG, "Touch: toggle chat");
+        Application::GetInstance().ToggleChatState();
     }
 
     void InitializeButtons() {
@@ -160,6 +194,7 @@ private:
     void InitializeTools() {
         static MotorController motor(MOTOR_LEFT_IN1, MOTOR_LEFT_IN2, MOTOR_RIGHT_IN1, MOTOR_RIGHT_IN2);
         static LampController decor_lamp(DECOR_LED_GPIO);
+        static PowerController power_ctrl(power_save_timer_);
     }
 
 public:

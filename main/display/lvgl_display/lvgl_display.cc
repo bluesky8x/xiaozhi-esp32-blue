@@ -191,22 +191,19 @@ void LvglDisplay::ShowNotification(const char* notification, int duration_ms) {
 void LvglDisplay::UpdateStatusBar(bool update_all) {
     auto& app = Application::GetInstance();
     auto& board = Board::GetInstance();
-    auto codec = board.GetAudioCodec();
 
-    // Update mute icon
-    {
+    // Update mute icon (skip GetAudioCodec when this display has no mute widget)
+    if (mute_label_ != nullptr) {
         DisplayLockGuard lock(this);
-        if (mute_label_ == nullptr) {
-            return;
-        }
-
-        // Update icon if mute state changes
-        if (codec->output_volume() == 0 && !muted_) {
-            muted_ = true;
-            lv_label_set_text(mute_label_, MATERIAL_SYMBOLS_VOLUME_OFF);
-        } else if (codec->output_volume() > 0 && muted_) {
-            muted_ = false;
-            lv_label_set_text(mute_label_, "");
+        auto codec = board.GetAudioCodec();
+        if (codec != nullptr) {
+            if (codec->output_volume() == 0 && !muted_) {
+                muted_ = true;
+                lv_label_set_text(mute_label_, MATERIAL_SYMBOLS_VOLUME_OFF);
+            } else if (codec->output_volume() > 0 && muted_) {
+                muted_ = false;
+                lv_label_set_text(mute_label_, "");
+            }
         }
     }
 

@@ -6,6 +6,7 @@
 #include "system_reset.h"
 #include "power_save_timer.h"
 #include "assets/lang_config.h"
+#include "blue_cloud_guard.h"
 
 #include <esp_timer.h>
 
@@ -18,9 +19,17 @@
 #if BLUE_V2_OTTO_LCD_ONLY && BLUE_V2_OTTO_AUDIO_ENABLE
 #include "codecs/no_audio_codec.h"
 #endif
-#if BLUE_V2_OTTO_LCD_ONLY && BLUE_V2_OTTO_MOTOR_ENABLE
+#if BLUE_V2_OTTO_LCD_ONLY && (BLUE_V2_OTTO_MOTOR_ENABLE || BLUE_V2_OTTO_TOF_ENABLE)
+#if BLUE_V2_OTTO_MOTOR_ENABLE
 #include "motor_controller.h"
 #include "../blue-v1/power_controller.h"
+#endif
+#if BLUE_V2_OTTO_TOF_ENABLE
+#include "tof_controller.h"
+#if BLUE_V2_OTTO_MOTOR_ENABLE
+#include "tof_motor_guard.h"
+#endif
+#endif
 #endif
 #if !BLUE_V2_LCD_TEST_SCREEN && !BLUE_V2_OTTO_LCD_ONLY
 #include "codecs/no_audio_codec.h"
@@ -199,8 +208,12 @@ private:
         display_ = new BlueV2OttoDisplay(panel_io, panel, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X,
                                            DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y,
                                            DISPLAY_SWAP_XY);
-#if BLUE_V2_OTTO_MOTOR_ENABLE
+#if BLUE_V2_OTTO_MOTOR_ENABLE && BLUE_V2_OTTO_TOF_ENABLE
+        ESP_LOGI(TAG, "ST7789 + Otto bench (LCD + I2S + motor + ToF, no wake word)");
+#elif BLUE_V2_OTTO_MOTOR_ENABLE
         ESP_LOGI(TAG, "ST7789 + Otto bench (LCD + I2S + motor, no wake word)");
+#elif BLUE_V2_OTTO_TOF_ENABLE
+        ESP_LOGI(TAG, "ST7789 + Otto bench (LCD + I2S + ToF, no wake word)");
 #elif BLUE_V2_OTTO_AUDIO_ENABLE
         ESP_LOGI(TAG, "ST7789 + Otto bench (LCD + I2S, no motor/wake word)");
 #else
@@ -356,13 +369,29 @@ private:
         }
     }
 
-#if BLUE_V2_OTTO_LCD_ONLY && BLUE_V2_OTTO_MOTOR_ENABLE
+#if BLUE_V2_OTTO_LCD_ONLY && (BLUE_V2_OTTO_MOTOR_ENABLE || BLUE_V2_OTTO_TOF_ENABLE)
     void InitializeOttoBenchTools() {
+#if BLUE_V2_OTTO_MOTOR_ENABLE
         static MotorController motor(MOTOR_LEFT_IN1, MOTOR_LEFT_IN2, MOTOR_RIGHT_IN1, MOTOR_RIGHT_IN2);
         static PowerController power_ctrl(power_save_timer_);
         bench_motor_ = &motor;
-        (void)motor;
-        ESP_LOGI(TAG, "Motor MCP tools registered (MX1508 GPIO 11-14, bench mode)");
+#endif
+#if BLUE_V2_OTTO_TOF_ENABLE
+        if (TofController::Instance().Init()) {
+#if BLUE_V2_OTTO_MOTOR_ENABLE
+            static TofMotorGuard tof_guard(&motor);
+            if (!tof_guard.Start()) {
+                ESP_LOGW(TAG, "ToF obstacle guard not active");
+            }
+#else
+            ESP_LOGI(TAG, "ToF ready (no motor — guard disabled)");
+#endif
+        } else {
+            ESP_LOGW(TAG, "ToF sensor not available (optional)");
+        }
+#endif
+        ESP_LOGI(TAG, "Otto bench tools ready (motor=%d tof=%d)", BLUE_V2_OTTO_MOTOR_ENABLE ? 1 : 0,
+                 BLUE_V2_OTTO_TOF_ENABLE ? 1 : 0);
     }
 
     MotorController* bench_motor_ = nullptr;
@@ -390,6 +419,9 @@ public:
     BlueV2Board()
         : boot_button_(BOOT_BUTTON_GPIO, false, FACTORY_RESET_LONG_PRESS_MS),
           touch_button_(TOUCH_BUTTON_GPIO, TOUCH_BUTTON_ACTIVE_HIGH) {
+#if BLUE_V2_BLOCK_CLOUD_SERVERS
+        BlueSanitizeStoredServerSettings();
+#endif
         LogResetReason();
         InitializeSystemReset();
         InitializeSpi();
@@ -404,7 +436,7 @@ public:
         InitializeTools();
         ESP_LOGI(TAG, "Robot tools initialized (deferred until activation)");
 #elif BLUE_V2_OTTO_LCD_ONLY
-#if BLUE_V2_OTTO_MOTOR_ENABLE
+#if BLUE_V2_OTTO_MOTOR_ENABLE || BLUE_V2_OTTO_TOF_ENABLE
         InitializeOttoBenchTools();
 #endif
         ESP_LOGI(TAG, "Otto bench init done (no wake word)");
