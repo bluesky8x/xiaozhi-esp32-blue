@@ -13,17 +13,10 @@
 #include <sdkconfig.h>
 #if CONFIG_BOARD_TYPE_BLUE_V2
 #include "boards/blue-v2/config.h"
-#if BLUE_V2_USE_V3_DISPLAY
-#include "boards/blue-v3/blue_v3_test_display.h"
-#endif
 #if BLUE_V2_OTTO_LCD_ONLY
 #include "boards/blue-v2/blue_v2_otto_display.h"
 #include "boards/blue-v2/blue_cloud_guard.h"
 #endif
-#endif
-#if CONFIG_BOARD_TYPE_BLUE_V4
-#include "boards/blue-v4/config.h"
-#include "boards/blue-v4/blue_v4_emoji_display.h"
 #endif
 #include "assets.h"
 #include "assets/lang_config.h"
@@ -99,18 +92,7 @@ void Application::Initialize() {
     }
     display->SetEmotion("neutral");
 #endif
-#if CONFIG_BOARD_TYPE_BLUE_V4
-    {
-        auto& assets = Assets::GetInstance();
-        if (assets.partition_valid()) {
-            assets.Apply(false);
-        } else {
-            ESP_LOGW(TAG, "Blue V4: assets partition unavailable — Otto GIF not loaded");
-        }
-    }
-    display->SetEmotion(BLUE_V4_DEFAULT_EMOTION);
-#endif
-#if CONFIG_BOARD_TYPE_BLUE_V2 || CONFIG_BOARD_TYPE_BLUE_V3 || CONFIG_BOARD_TYPE_BLUE_V4
+#if CONFIG_BOARD_TYPE_BLUE_V2
     if (auto* lcd = dynamic_cast<LcdDisplay*>(display)) {
         lcd->RefreshNow();
     }
@@ -118,10 +100,9 @@ void Application::Initialize() {
         backlight->RestoreBrightness();
     }
 #endif
-#if (CONFIG_BOARD_TYPE_BLUE_V2 && BLUE_V2_USE_V3_DISPLAY && !BLUE_V2_LCD_TEST_SCREEN && \
-     !BLUE_V2_OTTO_LCD_ONLY) || \
-    (CONFIG_BOARD_TYPE_BLUE_V2 && BLUE_V2_OTTO_LCD_ONLY && BLUE_V2_OTTO_AUDIO_ENABLE) || \
-    CONFIG_BOARD_TYPE_BLUE_V4
+#if CONFIG_BOARD_TYPE_BLUE_V2 && \
+    ((BLUE_V2_USE_V3_DISPLAY && !BLUE_V2_LCD_TEST_SCREEN && !BLUE_V2_OTTO_LCD_ONLY) || \
+     (BLUE_V2_OTTO_LCD_ONLY && BLUE_V2_OTTO_AUDIO_ENABLE))
     // I2S DMA during early boot corrupt ST7789 SPI flush on this wiring (motor uses GPIO only).
     defer_blue_v2_heavy_init_ = true;
 #else
@@ -388,14 +369,8 @@ void Application::HandleActivationDoneEvent() {
 
 #if (CONFIG_BOARD_TYPE_BLUE_V2 && BLUE_V2_USE_V3_DISPLAY && !BLUE_V2_LCD_TEST_SCREEN && \
      !BLUE_V2_OTTO_LCD_ONLY) || \
-    (CONFIG_BOARD_TYPE_BLUE_V2 && BLUE_V2_OTTO_LCD_ONLY && BLUE_V2_OTTO_AUDIO_ENABLE) || \
-    CONFIG_BOARD_TYPE_BLUE_V4
+    (CONFIG_BOARD_TYPE_BLUE_V2 && BLUE_V2_OTTO_LCD_ONLY && BLUE_V2_OTTO_AUDIO_ENABLE)
     if (defer_blue_v2_heavy_init_) {
-#if CONFIG_BOARD_TYPE_BLUE_V2 && BLUE_V2_USE_V3_DISPLAY
-        if (auto* test_display = dynamic_cast<BlueV3TestDisplay*>(display)) {
-            test_display->RestoreAfterThemeRefresh();
-        }
-#endif
         auto codec = board.GetAudioCodec();
         audio_service_.Initialize(codec);
         audio_service_.Start();
@@ -404,18 +379,8 @@ void Application::HandleActivationDoneEvent() {
             otto->RestoreFace();
         }
 #endif
-#if CONFIG_BOARD_TYPE_BLUE_V4
-        if (auto* v4 = dynamic_cast<BlueV4EmojiDisplay*>(display)) {
-            v4->RestoreFace();
-        }
-#endif
         board.OnApplicationDisplayReady();
         defer_blue_v2_heavy_init_ = false;
-#if CONFIG_BOARD_TYPE_BLUE_V2 && BLUE_V2_USE_V3_DISPLAY
-        if (auto* test_display = dynamic_cast<BlueV3TestDisplay*>(display)) {
-            test_display->RestoreAfterThemeRefresh();
-        }
-#endif
 #if CONFIG_BOARD_TYPE_BLUE_V2 && BLUE_V2_OTTO_LCD_ONLY && BLUE_V2_OTTO_AUDIO_ENABLE
         if (auto* otto = dynamic_cast<BlueV2OttoDisplay*>(display)) {
             otto->RestoreFace();
@@ -424,13 +389,6 @@ void Application::HandleActivationDoneEvent() {
         if (auto* lcd = dynamic_cast<LcdDisplay*>(display)) {
             lcd->RefreshNow();
         }
-#if CONFIG_BOARD_TYPE_BLUE_V4
-        if (auto* v4 = dynamic_cast<BlueV4EmojiDisplay*>(display)) {
-            v4->RestoreFace();
-        } else {
-            display->SetEmotion(BLUE_V4_DEFAULT_EMOTION);
-        }
-#endif
 #if CONFIG_BOARD_TYPE_BLUE_V2 && BLUE_V2_OTTO_LCD_ONLY
         ESP_LOGI(TAG, "Otto bench: activation init done (motor/ToF, no wake word)");
 #else
@@ -445,11 +403,7 @@ void Application::HandleActivationDoneEvent() {
     display->ShowNotification(message.c_str());
     display->SetChatMessage("system", "");
 #if CONFIG_BOARD_TYPE_BLUE_V2
-#if BLUE_V2_USE_V3_DISPLAY
-    if (auto* test_display = dynamic_cast<BlueV3TestDisplay*>(display)) {
-        test_display->RestoreAfterThemeRefresh();
-    }
-#elif BLUE_V2_OTTO_LCD_ONLY
+#if BLUE_V2_OTTO_LCD_ONLY
     if (auto* otto = dynamic_cast<BlueV2OttoDisplay*>(display)) {
         otto->RestoreFace();
     }
@@ -459,26 +413,11 @@ void Application::HandleActivationDoneEvent() {
         lcd->RefreshNow();
     }
 #endif
-#if BLUE_V2_USE_V3_DISPLAY || BLUE_V2_LCD_TEST_SCREEN
+#if BLUE_V2_LCD_TEST_SCREEN
     if (auto* lcd = dynamic_cast<LcdDisplay*>(display)) {
         lcd->RefreshNow();
     }
 #endif
-#endif
-#if CONFIG_BOARD_TYPE_BLUE_V3
-    if (auto* lcd = dynamic_cast<LcdDisplay*>(display)) {
-        lcd->RefreshNow();
-    }
-#endif
-#if CONFIG_BOARD_TYPE_BLUE_V4
-    if (auto* v4 = dynamic_cast<BlueV4EmojiDisplay*>(display)) {
-        v4->RestoreFace();
-    } else {
-        display->SetEmotion(BLUE_V4_DEFAULT_EMOTION);
-        if (auto* lcd = dynamic_cast<LcdDisplay*>(display)) {
-            lcd->RefreshNow();
-        }
-    }
 #endif
 
     // Release OTA object after activation is complete
@@ -589,11 +528,6 @@ void Application::CheckAssetsVersion() {
         lcd->RefreshNow();
     }
 #endif
-#elif CONFIG_BOARD_TYPE_BLUE_V4
-    display->SetEmotion(BLUE_V4_DEFAULT_EMOTION);
-    if (auto* lcd = dynamic_cast<LcdDisplay*>(display)) {
-        lcd->RefreshNow();
-    }
 #else
     display->SetEmotion("robot_2");
 #endif
@@ -890,11 +824,6 @@ void Application::Alert(const char* status, const char* message, const char* emo
         display_emotion = BLUE_V2_DEFAULT_EMOTION;
     }
 #endif
-#if CONFIG_BOARD_TYPE_BLUE_V4
-    if (emotion == nullptr || strcmp(emotion, "cloud_off") == 0) {
-        display_emotion = BLUE_V4_DEFAULT_EMOTION;
-    }
-#endif
     display->SetEmotion(display_emotion);
     display->SetChatMessage("system", message);
     if (!sound.empty() && audio_service_.IsReady()) {
@@ -1134,9 +1063,7 @@ void Application::HandleStateChangedEvent() {
         case kDeviceStateIdle:
             display->SetStatus(Lang::Strings::STANDBY);
             display->ClearChatMessages();    // Clear messages first
-#if CONFIG_BOARD_TYPE_BLUE_V4
-            display->SetEmotion(BLUE_V4_DEFAULT_EMOTION);
-#elif CONFIG_BOARD_TYPE_BLUE_V2 && BLUE_V2_OTTO_LCD_ONLY
+#if CONFIG_BOARD_TYPE_BLUE_V2 && BLUE_V2_OTTO_LCD_ONLY
             display->SetEmotion(BLUE_V2_DEFAULT_EMOTION);
 #else
             display->SetEmotion("neutral");  // Then set emotion (wechat mode checks child count)
@@ -1147,24 +1074,11 @@ void Application::HandleStateChangedEvent() {
                 otto->RestoreFace();
             }
 #elif (CONFIG_BOARD_TYPE_BLUE_V2 && BLUE_V2_USE_V3_DISPLAY && !BLUE_V2_LCD_TEST_SCREEN && \
-       !BLUE_V2_OTTO_LCD_ONLY) || \
-    CONFIG_BOARD_TYPE_BLUE_V4
+       !BLUE_V2_OTTO_LCD_ONLY)
             // AFE wake-word init can stall SPI flush — refresh face after.
             Schedule([this]() {
                 audio_service_.EnableWakeWordDetection(true);
                 auto* lcd_display = Board::GetInstance().GetDisplay();
-#if CONFIG_BOARD_TYPE_BLUE_V2
-                if (auto* test_display = dynamic_cast<BlueV3TestDisplay*>(lcd_display)) {
-                    test_display->RestoreAfterThemeRefresh();
-                }
-#endif
-#if CONFIG_BOARD_TYPE_BLUE_V4
-                if (auto* v4 = dynamic_cast<BlueV4EmojiDisplay*>(lcd_display)) {
-                    v4->RestoreFace();
-                } else if (lcd_display != nullptr) {
-                    lcd_display->SetEmotion(BLUE_V4_DEFAULT_EMOTION);
-                }
-#endif
                 if (auto* lcd = dynamic_cast<LcdDisplay*>(lcd_display)) {
                     lcd->RefreshNow();
                 }
@@ -1300,15 +1214,6 @@ void RestoreDisplayAfterMotorGlitch() {
 #if CONFIG_BOARD_TYPE_BLUE_V2 && BLUE_V2_OTTO_LCD_ONLY
     if (auto* otto = dynamic_cast<BlueV2OttoDisplay*>(display)) {
         otto->HardRestoreFace();
-        return;
-    }
-#endif
-#if CONFIG_BOARD_TYPE_BLUE_V4
-    if (auto* v4 = dynamic_cast<BlueV4EmojiDisplay*>(display)) {
-        if (auto* lcd = dynamic_cast<LcdDisplay*>(display)) {
-            lcd->RecoverPanel();
-        }
-        v4->RestoreFace();
         return;
     }
 #endif

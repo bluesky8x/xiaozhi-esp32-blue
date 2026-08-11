@@ -95,6 +95,11 @@
 #define MOTOR_RIGHT_IN1  GPIO_NUM_12
 #define MOTOR_RIGHT_IN2  GPIO_NUM_11
 #define MOTOR_AUTO_STOP_MS 5000
+// Active brake (IN1=IN2=HIGH) before coast on stop — FS_MX1508 motorBrake() pattern, reduces mechanical jitter.
+#define MOTOR_BRAKE_ENABLE 1
+#define MOTOR_BRAKE_MS     50
+// Cap for future LEDC/SLOW_DECAY (Phase B). GPIO on/off still full speed when non-zero.
+#define MOTOR_MAX_DUTY_PCT 70
 
 // INMP441 (L/R→GND): AGC + soft compressor in no_audio_codec (see AUDIO_MIC_AGC_* in CMakeLists).
 #define AUDIO_MIC_SHIFT_BITS      12

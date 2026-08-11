@@ -11,7 +11,7 @@
 #include <esp_timer.h>
 
 #if BLUE_V2_LCD_TEST_SCREEN || BLUE_V2_USE_V3_DISPLAY
-#include "../blue-v3/blue_v3_test_display.h"
+#include "blue_v2_face_display.h"
 #endif
 #if BLUE_V2_LCD_TEST_SCREEN || (BLUE_V2_OTTO_LCD_ONLY && !BLUE_V2_OTTO_AUDIO_ENABLE)
 #include "audio_codec.h"
@@ -22,7 +22,7 @@
 #if BLUE_V2_OTTO_LCD_ONLY && (BLUE_V2_OTTO_MOTOR_ENABLE || BLUE_V2_OTTO_TOF_ENABLE)
 #if BLUE_V2_OTTO_MOTOR_ENABLE
 #include "motor_controller.h"
-#include "../blue-v1/power_controller.h"
+#include "power_controller.h"
 #endif
 #if BLUE_V2_OTTO_TOF_ENABLE
 #include "tof_controller.h"
@@ -40,7 +40,7 @@
 #include "tof_controller.h"
 #include "tof_motor_guard.h"
 #include "lamp_controller.h"
-#include "../blue-v1/power_controller.h"
+#include "power_controller.h"
 #endif
 #if BLUE_V2_OTTO_LCD_ONLY
 #include "blue_v2_otto_display.h"
@@ -220,13 +220,13 @@ private:
         ESP_LOGI(TAG, "ST7789 + Otto GIF bench (LCD only, no I2S/motor/wake word)");
 #endif
 #elif BLUE_V2_LCD_TEST_SCREEN || BLUE_V2_USE_V3_DISPLAY
-        display_ = new BlueV3TestDisplay(panel_io, panel, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X,
+        display_ = new BlueV2FaceDisplay(panel_io, panel, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X,
                                          DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y,
                                          DISPLAY_SWAP_XY);
 #if BLUE_V2_LCD_TEST_SCREEN
         ESP_LOGI(TAG, "ST7789 init OK — LCD TEST SCREEN mode (BLUE_V2_LCD_TEST_SCREEN=1)");
 #else
-        ESP_LOGI(TAG, "ST7789 init OK — BlueV3TestDisplay (robot, invert-safe)");
+        ESP_LOGI(TAG, "ST7789 init OK — BlueV2FaceDisplay (invert-safe)");
 #endif
 #else
         display_ = new BlueV2FaceDisplay(panel_io, panel, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X,

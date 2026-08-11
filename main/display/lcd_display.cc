@@ -78,7 +78,7 @@ LcdDisplay::LcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_
 
     // Load theme from settings
     Settings settings("display", false);
-#if CONFIG_BOARD_TYPE_BLUE_V2 || CONFIG_BOARD_TYPE_BLUE_V4
+#if CONFIG_BOARD_TYPE_BLUE_V2
     // ST7789 on Blue V2/V4 uses INVERT_COLOR: light theme LVGL bg=white → panel looks black.
     std::string theme_name = settings.GetString("theme", "light");
 #else
@@ -106,8 +106,7 @@ SpiLcdDisplay::SpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
                              bool mirror_y, bool swap_xy)
     : LcdDisplay(panel_io, panel, width, height) {
     // Clear panel before LVGL (Blue V2: INVERT_COLOR=true → send 0x0000 for white on panel)
-#if defined(CONFIG_BOARD_TYPE_BLUE_V2) || defined(CONFIG_BOARD_TYPE_BLUE_V3) || \
-    defined(CONFIG_BOARD_TYPE_BLUE_V4)
+#if defined(CONFIG_BOARD_TYPE_BLUE_V2)
     const uint16_t prefill = 0x0000;
 #else
     const uint16_t prefill = 0x0000;
@@ -152,8 +151,7 @@ SpiLcdDisplay::SpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
     lvgl_port_init(&port_cfg);
 
     ESP_LOGI(TAG, "Adding LCD display");
-#if defined(CONFIG_BOARD_TYPE_BLUE_V2) || defined(CONFIG_BOARD_TYPE_BLUE_V3) || \
-    defined(CONFIG_BOARD_TYPE_BLUE_V4)
+#if defined(CONFIG_BOARD_TYPE_BLUE_V2)
     // Partial refresh + internal DMA buffer. Full PSRAM frame (115200 B) exhausts SPI DMA priv
     // buffers once WiFi/HTTP starts → draw_bitmap fails → LVGL stuck in wait_for_flushing (WDT).
     const uint32_t lv_buffer_size =

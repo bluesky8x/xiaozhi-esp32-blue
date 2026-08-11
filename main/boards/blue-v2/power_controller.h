@@ -1,5 +1,5 @@
-#ifndef __POWER_CONTROLLER_H__
-#define __POWER_CONTROLLER_H__
+#ifndef __BLUE_V2_POWER_CONTROLLER_H__
+#define __BLUE_V2_POWER_CONTROLLER_H__
 
 #include "mcp_server.h"
 #include "power_save_timer.h"
@@ -25,4 +25,4 @@ private:
     PowerSaveTimer* timer_;
 };
 
-#endif
+#endif  // __BLUE_V2_POWER_CONTROLLER_H__

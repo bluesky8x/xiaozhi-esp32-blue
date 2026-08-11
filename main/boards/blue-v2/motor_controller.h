@@ -8,6 +8,8 @@
 #include <driver/gpio.h>
 #include <esp_log.h>
 #include <esp_timer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 #include <algorithm>
 
@@ -15,6 +17,18 @@
 
 #ifndef MOTOR_USE_GPIO_ONLY
 #define MOTOR_USE_GPIO_ONLY 1
+#endif
+
+#ifndef MOTOR_BRAKE_ENABLE
+#define MOTOR_BRAKE_ENABLE 1
+#endif
+
+#ifndef MOTOR_BRAKE_MS
+#define MOTOR_BRAKE_MS 50
+#endif
+
+#ifndef MOTOR_MAX_DUTY_PCT
+#define MOTOR_MAX_DUTY_PCT 100
 #endif
 
 // Call from board constructor — MotorController init is deferred until activation (~10s).
@@ -41,9 +55,48 @@ private:
     bool gpio_initialized_ = false;
     int left_speed_ = 0;
     int right_speed_ = 0;
+    int cached_level_left_in1_ = -1;
+    int cached_level_left_in2_ = -1;
+    int cached_level_right_in1_ = -1;
+    int cached_level_right_in2_ = -1;
 
     static void StopTimerCallback(void* arg) {
         static_cast<MotorController*>(arg)->Stop();
+    }
+
+    int* LevelCacheFor(gpio_num_t pin) {
+        if (pin == left_in1_) {
+            return &cached_level_left_in1_;
+        }
+        if (pin == left_in2_) {
+            return &cached_level_left_in2_;
+        }
+        if (pin == right_in1_) {
+            return &cached_level_right_in1_;
+        }
+        if (pin == right_in2_) {
+            return &cached_level_right_in2_;
+        }
+        return nullptr;
+    }
+
+    void ResetLevelCache() {
+        cached_level_left_in1_ = -1;
+        cached_level_left_in2_ = -1;
+        cached_level_right_in1_ = -1;
+        cached_level_right_in2_ = -1;
+    }
+
+    // Skip redundant gpio_set_level — fewer edges, less SPI/EMI glitch (FS_MX1508 analogWritePin idea).
+    void SetMotorPin(gpio_num_t pin, int level) {
+        int* cache = LevelCacheFor(pin);
+        if (cache != nullptr && *cache == level) {
+            return;
+        }
+        gpio_set_level(pin, level);
+        if (cache != nullptr) {
+            *cache = level;
+        }
     }
 
     void InitMotorGpio() {
@@ -56,25 +109,40 @@ private:
             gpio_set_direction(pin, GPIO_MODE_OUTPUT);
             gpio_set_level(pin, 0);
         }
+        ResetLevelCache();
+        cached_level_left_in1_ = 0;
+        cached_level_left_in2_ = 0;
+        cached_level_right_in1_ = 0;
+        cached_level_right_in2_ = 0;
         gpio_initialized_ = true;
         ESP_LOGI(MOTOR_TAG, "Motor GPIO outputs ready on %d/%d/%d/%d (no LEDC)",
                  left_in1_, left_in2_, right_in1_, right_in2_);
+    }
+
+    void CoastSide(gpio_num_t in1, gpio_num_t in2) {
+        SetMotorPin(in1, 0);
+        SetMotorPin(in2, 0);
+    }
+
+    // MX1508 active brake: both inputs HIGH (FS_MX1508 motorBrake).
+    void BrakeSide(gpio_num_t in1, gpio_num_t in2) {
+        SetMotorPin(in1, 1);
+        SetMotorPin(in2, 1);
     }
 
     // MX1508: forward = IN1 HIGH + IN2 LOW; reverse = IN2 HIGH + IN1 LOW.
     void DriveSide(gpio_num_t in1, gpio_num_t in2, int speed) {
         speed = std::clamp(speed, -100, 100);
         if (speed == 0) {
-            gpio_set_level(in1, 0);
-            gpio_set_level(in2, 0);
+            CoastSide(in1, in2);
             return;
         }
         if (speed > 0) {
-            gpio_set_level(in1, 1);
-            gpio_set_level(in2, 0);
+            SetMotorPin(in1, 1);
+            SetMotorPin(in2, 0);
         } else {
-            gpio_set_level(in1, 0);
-            gpio_set_level(in2, 1);
+            SetMotorPin(in1, 0);
+            SetMotorPin(in2, 1);
         }
     }
 
@@ -186,8 +254,10 @@ public:
             return true;
         });
 
-        ESP_LOGI(MOTOR_TAG, "Motor MCP tools registered (GPIO on/off, MX1508 %d/%d/%d/%d)",
-                 left_in1_, left_in2_, right_in1_, right_in2_);
+        ESP_LOGI(MOTOR_TAG,
+                 "Motor MCP tools registered (GPIO MX1508 %d/%d/%d/%d, brake=%d %dms, max_duty=%d%%)",
+                 left_in1_, left_in2_, right_in1_, right_in2_, MOTOR_BRAKE_ENABLE, MOTOR_BRAKE_MS,
+                 MOTOR_MAX_DUTY_PCT);
     }
 
     ~MotorController() {
@@ -217,13 +287,24 @@ public:
 
     void Stop() {
         esp_timer_stop(stop_timer_);
+        const bool was_moving = left_speed_ != 0 || right_speed_ != 0;
         left_speed_ = 0;
         right_speed_ = 0;
         if (gpio_initialized_) {
-            DriveSide(left_in1_, left_in2_, 0);
-            DriveSide(right_in1_, right_in2_, 0);
+#if MOTOR_BRAKE_ENABLE
+            if (was_moving) {
+                BrakeSide(left_in1_, left_in2_);
+                BrakeSide(right_in1_, right_in2_);
+                vTaskDelay(pdMS_TO_TICKS(MOTOR_BRAKE_MS));
+                ESP_LOGI(MOTOR_TAG, "Motors brake %dms then coast", MOTOR_BRAKE_MS);
+            }
+#endif
+            CoastSide(left_in1_, left_in2_);
+            CoastSide(right_in1_, right_in2_);
         }
-        ESP_LOGI(MOTOR_TAG, "Motors stopped");
+        if (!was_moving) {
+            ESP_LOGI(MOTOR_TAG, "Motors stopped");
+        }
 #if CONFIG_BOARD_TYPE_BLUE_V2
         Application::GetInstance().ScheduleListeningResyncAfterRobotAction();
 #endif
