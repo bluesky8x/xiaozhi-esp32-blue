@@ -18,12 +18,64 @@
 #define AUDIO_MIC_SOFT_LIMIT 0
 #endif
 
+#ifndef AUDIO_MIC_AGC_ENABLE
+#define AUDIO_MIC_AGC_ENABLE 0
+#endif
+
+#ifndef AUDIO_MIC_AGC_TARGET_PEAK
+#define AUDIO_MIC_AGC_TARGET_PEAK 4500
+#endif
+
+#ifndef AUDIO_MIC_AGC_MAX_GAIN
+#define AUDIO_MIC_AGC_MAX_GAIN 8.0f
+#endif
+
+#ifndef AUDIO_MIC_AGC_MIN_GAIN
+#define AUDIO_MIC_AGC_MIN_GAIN 0.35f
+#endif
+
+#ifndef AUDIO_MIC_AGC_ATTACK
+#define AUDIO_MIC_AGC_ATTACK 0.70f
+#endif
+
+#ifndef AUDIO_MIC_AGC_RELEASE
+#define AUDIO_MIC_AGC_RELEASE 0.05f
+#endif
+
+#ifndef AUDIO_MIC_COMPRESS_KNEE
+#define AUDIO_MIC_COMPRESS_KNEE 10000
+#endif
+
+#ifndef AUDIO_MIC_COMPRESS_RATIO
+#define AUDIO_MIC_COMPRESS_RATIO 4
+#endif
+
 #define TAG "NoAudioCodec"
 
 namespace {
 
+#if AUDIO_MIC_AGC_ENABLE
+float s_agc_gain = 1.0f;
+#endif
+
+int32_t SoftCompressSample(int32_t sample) {
+#if AUDIO_MIC_SOFT_LIMIT > 0 && AUDIO_MIC_COMPRESS_KNEE > 0
+    const int32_t abs_sample = sample >= 0 ? sample : -sample;
+    if (abs_sample <= AUDIO_MIC_COMPRESS_KNEE) {
+        return sample;
+    }
+    int32_t compressed = AUDIO_MIC_COMPRESS_KNEE + (abs_sample - AUDIO_MIC_COMPRESS_KNEE) / AUDIO_MIC_COMPRESS_RATIO;
+    if (compressed > AUDIO_MIC_SOFT_LIMIT) {
+        compressed = AUDIO_MIC_SOFT_LIMIT;
+    }
+    return sample >= 0 ? compressed : -compressed;
+#else
+    return sample;
+#endif
+}
+
 void SoftLimitPcm(int16_t* dest, int samples) {
-#if AUDIO_MIC_SOFT_LIMIT > 0
+#if AUDIO_MIC_SOFT_LIMIT > 0 && !AUDIO_MIC_AGC_ENABLE
     for (int i = 0; i < samples; i++) {
         if (dest[i] > AUDIO_MIC_SOFT_LIMIT) {
             dest[i] = AUDIO_MIC_SOFT_LIMIT;
@@ -46,6 +98,93 @@ void ApplyInputGain(int16_t* dest, int samples, float gain) {
     }
 }
 
+void ProcessMicSamples(const int32_t* raw_i2s, int16_t* dest, int samples, float base_gain,
+                       int32_t* raw_peak_out, int32_t* pre_peak_out, int32_t* post_peak_out,
+                       float* effective_gain_out) {
+    int32_t raw_peak = 0;
+    int32_t pre_peak = 0;
+
+    for (int i = 0; i < samples; i++) {
+        const int32_t raw_abs = raw_i2s[i] >= 0 ? raw_i2s[i] : -raw_i2s[i];
+        if (raw_abs > raw_peak) {
+            raw_peak = raw_abs;
+        }
+        int32_t value = raw_i2s[i] >> AUDIO_MIC_SHIFT_BITS;
+        if (value > INT16_MAX) {
+            value = INT16_MAX;
+        } else if (value < -INT16_MAX) {
+            value = static_cast<int16_t>(-INT16_MAX);
+        }
+        const int32_t pre_abs = value >= 0 ? value : -value;
+        if (pre_abs > pre_peak) {
+            pre_peak = pre_abs;
+        }
+        dest[i] = static_cast<int16_t>(value);
+    }
+
+    float effective_gain = base_gain;
+#if AUDIO_MIC_AGC_ENABLE
+    {
+        const float ref_peak = static_cast<float>(pre_peak > 32 ? pre_peak : 32);
+        float block_gain = static_cast<float>(AUDIO_MIC_AGC_TARGET_PEAK) / ref_peak;
+        if (block_gain > AUDIO_MIC_AGC_MAX_GAIN) {
+            block_gain = AUDIO_MIC_AGC_MAX_GAIN;
+        }
+        if (block_gain < AUDIO_MIC_AGC_MIN_GAIN) {
+            block_gain = AUDIO_MIC_AGC_MIN_GAIN;
+        }
+        if (block_gain < s_agc_gain) {
+            s_agc_gain = s_agc_gain * (1.0f - AUDIO_MIC_AGC_ATTACK) + block_gain * AUDIO_MIC_AGC_ATTACK;
+        } else {
+            s_agc_gain = s_agc_gain * (1.0f - AUDIO_MIC_AGC_RELEASE) + block_gain * AUDIO_MIC_AGC_RELEASE;
+        }
+        effective_gain = base_gain * s_agc_gain;
+    }
+
+    for (int i = 0; i < samples; i++) {
+        float amplified = static_cast<float>(dest[i]) * effective_gain;
+        int32_t sample = static_cast<int32_t>(amplified);
+        if (sample > INT16_MAX) {
+            sample = INT16_MAX;
+        } else if (sample < -INT16_MAX) {
+            sample = static_cast<int16_t>(-INT16_MAX);
+        }
+        sample = SoftCompressSample(sample);
+#if AUDIO_MIC_SOFT_LIMIT > 0
+        if (sample > AUDIO_MIC_SOFT_LIMIT) {
+            sample = AUDIO_MIC_SOFT_LIMIT;
+        } else if (sample < -AUDIO_MIC_SOFT_LIMIT) {
+            sample = -AUDIO_MIC_SOFT_LIMIT;
+        }
+#endif
+        dest[i] = static_cast<int16_t>(sample);
+    }
+#else
+    ApplyInputGain(dest, samples, base_gain);
+    SoftLimitPcm(dest, samples);
+#endif
+
+    if (effective_gain_out != nullptr) {
+        *effective_gain_out = effective_gain;
+    }
+    if (raw_peak_out != nullptr) {
+        *raw_peak_out = raw_peak;
+    }
+    if (pre_peak_out != nullptr) {
+        *pre_peak_out = pre_peak;
+    }
+    if (post_peak_out != nullptr) {
+        int32_t post_peak = 0;
+        for (int i = 0; i < samples; i++) {
+            const int32_t post_abs = dest[i] >= 0 ? dest[i] : -dest[i];
+            if (post_abs > post_peak) {
+                post_peak = post_abs;
+            }
+        }
+        *post_peak_out = post_peak;
+    }
+}
+
 #if AUDIO_MIC_DEBUG_LOG
 void LogMicLevels(int samples, int32_t raw_peak, int32_t pre_gain_peak, int32_t post_gain_peak, float gain,
                   bool read_failed) {
@@ -63,20 +202,21 @@ void LogMicLevels(int samples, int32_t raw_peak, int32_t pre_gain_peak, int32_t 
     }
 
     const char* hint = "OK";
-    if (post_gain_peak >= 32000 || pre_gain_peak >= 32000) {
-        if (gain > 1.0f) {
-            hint = "CLIPPING — lower AUDIO_MIC_INPUT_GAIN";
-        } else {
-            hint = "HOT — TTS echo/noise; shift++ or half-duplex";
-        }
+    if (post_gain_peak >= 32000) {
+        hint = "HOT — spike/noise (AGC limiting)";
     } else if (post_gain_peak < 350) {
         hint = "quiet idle";
     } else if (post_gain_peak < 3000) {
-        hint = "weak — raise gain slightly";
+        hint = "weak";
     }
 
+#if AUDIO_MIC_AGC_ENABLE
+    ESP_LOGI(TAG, "Mic: raw=%ld pre=%ld post=%ld base=%.1f agc=%.2f (%s)", static_cast<long>(raw_peak),
+             static_cast<long>(pre_gain_peak), static_cast<long>(post_gain_peak), gain, s_agc_gain, hint);
+#else
     ESP_LOGI(TAG, "Mic: raw=%ld pre=%ld post=%ld gain=%.1f (%s)", static_cast<long>(raw_peak),
              static_cast<long>(pre_gain_peak), static_cast<long>(post_gain_peak), gain, hint);
+#endif
 }
 #endif
 
@@ -337,36 +477,13 @@ int NoAudioCodec::Read(int16_t* dest, int samples) {
 #if AUDIO_MIC_DEBUG_LOG
     int32_t raw_peak = 0;
     int32_t pre_gain_peak = 0;
-#endif
-    for (int i = 0; i < samples; i++) {
-#if AUDIO_MIC_DEBUG_LOG
-        const int32_t raw_abs =
-            bit32_buffer[i] >= 0 ? bit32_buffer[i] : -bit32_buffer[i];
-        if (raw_abs > raw_peak) {
-            raw_peak = raw_abs;
-        }
-#endif
-        int32_t value = bit32_buffer[i] >> AUDIO_MIC_SHIFT_BITS;
-        dest[i] = (value > INT16_MAX) ? INT16_MAX : (value < -INT16_MAX) ? -INT16_MAX : (int16_t)value;
-#if AUDIO_MIC_DEBUG_LOG
-        const int32_t pcm_abs = dest[i] >= 0 ? dest[i] : -dest[i];
-        if (pcm_abs > pre_gain_peak) {
-            pre_gain_peak = pcm_abs;
-        }
-#endif
-    }
-
-    ApplyInputGain(dest, samples, input_gain_);
-    SoftLimitPcm(dest, samples);
-#if AUDIO_MIC_DEBUG_LOG
     int32_t post_gain_peak = 0;
-    for (int i = 0; i < samples; i++) {
-        const int32_t pcm_abs = dest[i] >= 0 ? dest[i] : -dest[i];
-        if (pcm_abs > post_gain_peak) {
-            post_gain_peak = pcm_abs;
-        }
-    }
+    float effective_gain = input_gain_;
+    ProcessMicSamples(bit32_buffer.data(), dest, samples, input_gain_, &raw_peak, &pre_gain_peak,
+                      &post_gain_peak, &effective_gain);
     LogMicLevels(samples, raw_peak, pre_gain_peak, post_gain_peak, input_gain_, false);
+#else
+    ProcessMicSamples(bit32_buffer.data(), dest, samples, input_gain_, nullptr, nullptr, nullptr, nullptr);
 #endif
     return samples;
 }
