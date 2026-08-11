@@ -42,6 +42,10 @@
 #define AUDIO_MIC_AGC_RELEASE 0.05f
 #endif
 
+#ifndef AUDIO_MIC_AGC_POST_MOTOR_FLOOR
+#define AUDIO_MIC_AGC_POST_MOTOR_FLOOR 2.0f
+#endif
+
 #ifndef AUDIO_MIC_COMPRESS_KNEE
 #define AUDIO_MIC_COMPRESS_KNEE 10000
 #endif
@@ -52,11 +56,11 @@
 
 #define TAG "NoAudioCodec"
 
-namespace {
-
 #if AUDIO_MIC_AGC_ENABLE
-float s_agc_gain = 1.0f;
+static float s_mic_agc_gain = 1.0f;
 #endif
+
+namespace {
 
 int32_t SoftCompressSample(int32_t sample) {
 #if AUDIO_MIC_SOFT_LIMIT > 0 && AUDIO_MIC_COMPRESS_KNEE > 0
@@ -133,12 +137,12 @@ void ProcessMicSamples(const int32_t* raw_i2s, int16_t* dest, int samples, float
         if (block_gain < AUDIO_MIC_AGC_MIN_GAIN) {
             block_gain = AUDIO_MIC_AGC_MIN_GAIN;
         }
-        if (block_gain < s_agc_gain) {
-            s_agc_gain = s_agc_gain * (1.0f - AUDIO_MIC_AGC_ATTACK) + block_gain * AUDIO_MIC_AGC_ATTACK;
+        if (block_gain < s_mic_agc_gain) {
+            s_mic_agc_gain = s_mic_agc_gain * (1.0f - AUDIO_MIC_AGC_ATTACK) + block_gain * AUDIO_MIC_AGC_ATTACK;
         } else {
-            s_agc_gain = s_agc_gain * (1.0f - AUDIO_MIC_AGC_RELEASE) + block_gain * AUDIO_MIC_AGC_RELEASE;
+            s_mic_agc_gain = s_mic_agc_gain * (1.0f - AUDIO_MIC_AGC_RELEASE) + block_gain * AUDIO_MIC_AGC_RELEASE;
         }
-        effective_gain = base_gain * s_agc_gain;
+        effective_gain = base_gain * s_mic_agc_gain;
     }
 
     for (int i = 0; i < samples; i++) {
@@ -212,7 +216,7 @@ void LogMicLevels(int samples, int32_t raw_peak, int32_t pre_gain_peak, int32_t 
 
 #if AUDIO_MIC_AGC_ENABLE
     ESP_LOGI(TAG, "Mic: raw=%ld pre=%ld post=%ld base=%.1f agc=%.2f (%s)", static_cast<long>(raw_peak),
-             static_cast<long>(pre_gain_peak), static_cast<long>(post_gain_peak), gain, s_agc_gain, hint);
+             static_cast<long>(pre_gain_peak), static_cast<long>(post_gain_peak), gain, s_mic_agc_gain, hint);
 #else
     ESP_LOGI(TAG, "Mic: raw=%ld pre=%ld post=%ld gain=%.1f (%s)", static_cast<long>(raw_peak),
              static_cast<long>(pre_gain_peak), static_cast<long>(post_gain_peak), gain, hint);
@@ -617,4 +621,15 @@ int NoAudioCodecSimplexPdm::Read(int16_t* dest, int samples) {
     ApplyInputGain(dest, samples, input_gain_);
     SoftLimitPcm(dest, samples);
     return samples;
+}
+
+void NoAudioCodec::ResetMicAgc() {
+#if AUDIO_MIC_AGC_ENABLE
+    const float prev = s_mic_agc_gain;
+    if (s_mic_agc_gain < AUDIO_MIC_AGC_POST_MOTOR_FLOOR) {
+        s_mic_agc_gain = AUDIO_MIC_AGC_POST_MOTOR_FLOOR;
+    }
+    ESP_LOGI(TAG, "Mic AGC after robot action: %.2f -> %.2f (floor=%.1f)", prev, s_mic_agc_gain,
+             AUDIO_MIC_AGC_POST_MOTOR_FLOOR);
+#endif
 }

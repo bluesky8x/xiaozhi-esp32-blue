@@ -136,6 +136,8 @@ public:
     bool IsReady() const { return codec_ != nullptr; }
     bool ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples);
     void ResetDecoder();
+    /** Re-open mic pipeline after motor EMI without double start-listening. */
+    void RecoverMicAfterRobotAction();
     void SetModelsList(srmodel_list_t* models_list);
 
 private:

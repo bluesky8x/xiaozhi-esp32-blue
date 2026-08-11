@@ -18,6 +18,8 @@ protected:
 
 public:
     virtual ~NoAudioCodec();
+    /** After motor EMI: clamp AGC floor instead of full reset (Blue V2 INMP441). */
+    static void ResetMicAgc();
 };
 
 class NoAudioCodecDuplex : public NoAudioCodec {

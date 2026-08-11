@@ -1,4 +1,5 @@
 #include "audio_service.h"
+#include "codecs/no_audio_codec.h"
 #include <esp_log.h>
 #include <cstring>
 
@@ -742,6 +743,13 @@ bool AudioService::IsIdle() {
 bool AudioService::IsPlaybackIdle() {
     std::lock_guard<std::mutex> lock(audio_queue_mutex_);
     return IsPlaybackDrainedLocked();
+}
+
+void AudioService::RecoverMicAfterRobotAction() {
+    NoAudioCodec::ResetMicAgc();
+    audio_input_need_warmup_ = true;
+    ResetDecoder();
+    ESP_LOGI(TAG, "Mic pipeline recovered after robot action");
 }
 
 void AudioService::ResetDecoder() {

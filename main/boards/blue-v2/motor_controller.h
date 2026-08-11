@@ -52,6 +52,7 @@ private:
     gpio_num_t right_in1_;
     gpio_num_t right_in2_;
     esp_timer_handle_t stop_timer_ = nullptr;
+    esp_timer_handle_t brake_timer_ = nullptr;
     bool gpio_initialized_ = false;
     int left_speed_ = 0;
     int right_speed_ = 0;
@@ -62,6 +63,18 @@ private:
 
     static void StopTimerCallback(void* arg) {
         static_cast<MotorController*>(arg)->Stop();
+    }
+
+    static void BrakeTimerCallback(void* arg) {
+        static_cast<MotorController*>(arg)->FinishCoastAfterBrake();
+    }
+
+    void FinishCoastAfterBrake() {
+        if (!gpio_initialized_) {
+            return;
+        }
+        CoastSide(left_in1_, left_in2_);
+        CoastSide(right_in1_, right_in2_);
     }
 
     int* LevelCacheFor(gpio_num_t pin) {
@@ -171,6 +184,15 @@ public:
         };
         ESP_ERROR_CHECK(esp_timer_create(&timer_args, &stop_timer_));
 
+        esp_timer_create_args_t brake_args = {
+            .callback = BrakeTimerCallback,
+            .arg = this,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "motor_brake",
+            .skip_unhandled_events = true,
+        };
+        ESP_ERROR_CHECK(esp_timer_create(&brake_args, &brake_timer_));
+
         auto& mcp_server = McpServer::GetInstance();
 
         mcp_server.AddTool("self.motor.stop", "Stop all motors. Use for: dừng, dừng lại, stop.", PropertyList(),
@@ -266,6 +288,11 @@ public:
             esp_timer_delete(stop_timer_);
             stop_timer_ = nullptr;
         }
+        if (brake_timer_ != nullptr) {
+            esp_timer_stop(brake_timer_);
+            esp_timer_delete(brake_timer_);
+            brake_timer_ = nullptr;
+        }
         Stop();
     }
 
@@ -287,6 +314,9 @@ public:
 
     void Stop() {
         esp_timer_stop(stop_timer_);
+        if (brake_timer_ != nullptr) {
+            esp_timer_stop(brake_timer_);
+        }
         const bool was_moving = left_speed_ != 0 || right_speed_ != 0;
         left_speed_ = 0;
         right_speed_ = 0;
@@ -295,18 +325,24 @@ public:
             if (was_moving) {
                 BrakeSide(left_in1_, left_in2_);
                 BrakeSide(right_in1_, right_in2_);
-                vTaskDelay(pdMS_TO_TICKS(MOTOR_BRAKE_MS));
-                ESP_LOGI(MOTOR_TAG, "Motors brake %dms then coast", MOTOR_BRAKE_MS);
+                if (brake_timer_ != nullptr) {
+                    esp_timer_start_once(brake_timer_, static_cast<uint64_t>(MOTOR_BRAKE_MS) * 1000);
+                }
+                ESP_LOGI(MOTOR_TAG, "Motors brake %dms then coast (async)", MOTOR_BRAKE_MS);
+            } else {
+                FinishCoastAfterBrake();
             }
+#else
+            FinishCoastAfterBrake();
 #endif
-            CoastSide(left_in1_, left_in2_);
-            CoastSide(right_in1_, right_in2_);
         }
         if (!was_moving) {
             ESP_LOGI(MOTOR_TAG, "Motors stopped");
         }
 #if CONFIG_BOARD_TYPE_BLUE_V2
-        Application::GetInstance().ScheduleListeningResyncAfterRobotAction();
+        if (was_moving) {
+            Application::GetInstance().ScheduleListeningResyncAfterRobotAction();
+        }
 #endif
     }
 

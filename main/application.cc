@@ -1162,13 +1162,16 @@ void Application::EnsureListeningAfterRobotAction() {
         return;
     }
     pending_listening_start_ = false;
-    StartListeningAudio();
+    audio_service_.RecoverMicAfterRobotAction();
+    protocol_->SendStartListening(listening_mode_);
+    if (!audio_service_.IsAudioProcessorRunning()) {
+        audio_service_.EnableVoiceProcessing(true);
+    }
+    ConfigureWakeWordForListening();
     ESP_LOGI(TAG, "Listening re-synced after robot action");
 }
 
 void Application::ScheduleListeningResyncAfterRobotAction() {
-    Schedule([this]() { EnsureListeningAfterRobotAction(); });
-
     static esp_timer_handle_t resync_timer = nullptr;
     if (resync_timer == nullptr) {
         esp_timer_create_args_t args = {
@@ -1185,8 +1188,9 @@ void Application::ScheduleListeningResyncAfterRobotAction() {
         };
         ESP_ERROR_CHECK(esp_timer_create(&args, &resync_timer));
     }
+    // Single delayed resync after motor EMI + brake settle (avoid double ResetDecoder).
     esp_timer_stop(resync_timer);
-    ESP_ERROR_CHECK(esp_timer_start_once(resync_timer, 500000));
+    ESP_ERROR_CHECK(esp_timer_start_once(resync_timer, 600000));
 }
 
 void Application::ConfigureWakeWordForListening() {
