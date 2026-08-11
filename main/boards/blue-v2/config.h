@@ -27,6 +27,9 @@
 #define BUILTIN_LED_GPIO        GPIO_NUM_48
 #define BOOT_BUTTON_GPIO        GPIO_NUM_0
 #define TOUCH_BUTTON_GPIO       GPIO_NUM_16
+// TTP223 SIG goes HIGH when touched (most modules). Set 0 if your module is active-low.
+#define TOUCH_BUTTON_ACTIVE_HIGH 1
+#define TOUCH_DEBOUNCE_MS       350
 
 #define RESET_NVS_BUTTON_GPIO       GPIO_NUM_NC
 #define RESET_FACTORY_BUTTON_GPIO   GPIO_NUM_NC

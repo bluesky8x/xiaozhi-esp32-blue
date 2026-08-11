@@ -118,8 +118,10 @@ Firmware gọi reset phần cứng qua GPIO 18 khi pin ≠ `NC`; nếu RES đã 
 
 | Chạm (click) | Hành vi firmware |
 |--------------|------------------|
-| Mọi lúc (trừ sleep) | Bắt đầu / dừng trò chuyện *(giống BOOT)* |
+| Mọi lúc (trừ sleep) | Bắt đầu / dừng trò chuyện *(giống BOOT)* — phản hồi ngay khi chạm (active HIGH) |
 | Sleep (idle 60 s) | Wake + gọi AI |
+
+Firmware: `TOUCH_BUTTON_ACTIVE_HIGH=1`, debounce 350 ms. Module TTP223 đa số OUT=HIGH khi chạm.
 
 > Không dùng chạm để mute mic khi đang nghe — tránh treo I2S duplex trên breadboard.
 

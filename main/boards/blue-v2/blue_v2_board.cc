@@ -7,6 +7,8 @@
 #include "power_save_timer.h"
 #include "assets/lang_config.h"
 
+#include <esp_timer.h>
+
 #if BLUE_V2_LCD_TEST_SCREEN || BLUE_V2_USE_V3_DISPLAY
 #include "../blue-v3/blue_v3_test_display.h"
 #endif
@@ -114,6 +116,7 @@ private:
     LcdDisplay* display_ = nullptr;
     PowerSaveTimer* power_save_timer_ = nullptr;
     bool mic_muted_by_user_ = false;
+    int64_t last_touch_us_ = 0;
 
     void InitializeSpi() {
         spi_bus_config_t buscfg = {};
@@ -305,6 +308,12 @@ private:
     }
 
     void HandleTouchClick() {
+        const int64_t now_us = esp_timer_get_time();
+        if (now_us - last_touch_us_ < static_cast<int64_t>(TOUCH_DEBOUNCE_MS) * 1000) {
+            return;
+        }
+        last_touch_us_ = now_us;
+
         if (power_save_timer_ != nullptr) {
             const bool was_sleeping = power_save_timer_->IsInSleepMode();
             power_save_timer_->WakeUp();
@@ -341,8 +350,9 @@ private:
 
         if (TOUCH_BUTTON_GPIO != GPIO_NUM_NC &&
             (!BLUE_V2_OTTO_LCD_ONLY || BLUE_V2_OTTO_TOUCH_ENABLE)) {
-            touch_button_.OnClick([this]() { HandleTouchClick(); });
-            ESP_LOGI(TAG, "Touch button ready on GPIO %d", TOUCH_BUTTON_GPIO);
+            touch_button_.OnPressDown([this]() { HandleTouchClick(); });
+            ESP_LOGI(TAG, "Touch button ready on GPIO %d (active_%s, press-down)",
+                     TOUCH_BUTTON_GPIO, TOUCH_BUTTON_ACTIVE_HIGH ? "high" : "low");
         }
     }
 
@@ -379,7 +389,7 @@ private:
 public:
     BlueV2Board()
         : boot_button_(BOOT_BUTTON_GPIO, false, FACTORY_RESET_LONG_PRESS_MS),
-          touch_button_(TOUCH_BUTTON_GPIO) {
+          touch_button_(TOUCH_BUTTON_GPIO, TOUCH_BUTTON_ACTIVE_HIGH) {
         LogResetReason();
         InitializeSystemReset();
         InitializeSpi();
