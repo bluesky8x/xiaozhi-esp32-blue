@@ -111,7 +111,7 @@
 #define TOF_FRONT_I2C_ADDR   0x29
 #define TOF_REAR_I2C_ADDR    0x2A
 
-// Safety guard while moving forward (requires self.tof.calibrate on open floor first).
+// Safety guard while motors run (requires self.tof.calibrate on open floor first).
 #define TOF_OBSTACLE_GUARD_ENABLE 1
 #define TOF_CLIFF_GUARD_ENABLE    1
 
@@ -137,7 +137,7 @@
 // Verbose ToF / obstacle-guard logs on serial monitor (set 0 to reduce spam).
 #define TOF_DEBUG_LOG             1
 #define TOF_DEBUG_IDLE_LOG_MS     1000   // log range while motors idle
-#define TOF_DEBUG_MOVE_LOG_MS     150    // log range while moving forward
+#define TOF_DEBUG_MOVE_LOG_MS     150    // log range while any motor motion
 
 // Calibrate on open floor at normal travel distance (e.g. 300–450 mm on a table).
 #define TOF_CALIBRATION_DISTANCE_MM 400

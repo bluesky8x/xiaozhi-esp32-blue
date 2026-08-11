@@ -17,6 +17,19 @@
 #define MOTOR_USE_GPIO_ONLY 1
 #endif
 
+// Call from board constructor — MotorController init is deferred until activation (~10s).
+inline void MotorGpioBrakeEarly(gpio_num_t left_in1, gpio_num_t left_in2, gpio_num_t right_in1,
+                               gpio_num_t right_in2) {
+    const gpio_num_t pins[] = {left_in1, left_in2, right_in1, right_in2};
+    for (gpio_num_t pin : pins) {
+        gpio_reset_pin(pin);
+        gpio_set_direction(pin, GPIO_MODE_OUTPUT);
+        gpio_set_level(pin, 0);
+    }
+    ESP_LOGI(MOTOR_TAG, "Motor GPIO brake early on %d/%d/%d/%d (LOW until MCP init)",
+             left_in1, left_in2, right_in1, right_in2);
+}
+
 // MX1508 / L9110S on IN1–IN4. GPIO mode: sign = direction, magnitude ignored (full ON/OFF).
 class MotorController {
 private:

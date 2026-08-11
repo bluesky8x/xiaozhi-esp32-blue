@@ -423,12 +423,15 @@ public:
         BlueSanitizeStoredServerSettings();
 #endif
         LogResetReason();
+#if BLUE_V2_OTTO_MOTOR_ENABLE || (!BLUE_V2_LCD_TEST_SCREEN && !BLUE_V2_OTTO_LCD_ONLY)
+        MotorGpioBrakeEarly(MOTOR_LEFT_IN1, MOTOR_LEFT_IN2, MOTOR_RIGHT_IN1, MOTOR_RIGHT_IN2);
+#endif
         InitializeSystemReset();
         InitializeSpi();
         InitializeLcdDisplay();
         InitializePowerSaveTimer();
         InitializeButtons();
-        // I2S deferred until activation — motor GPIO is safe at boot.
+        // I2S + MotorController MCP deferred until activation; GPIO brake runs above.
     }
 
     void OnApplicationDisplayReady() override {

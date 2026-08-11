@@ -239,33 +239,33 @@ void TofMotorGuard::TaskEntry(void* arg) {
 
 void TofMotorGuard::PollOnce() {
     auto& tof = TofController::Instance();
-    bool was_moving_forward = false;
+    bool was_moving = false;
     int64_t last_debug_log_ms = 0;
     int64_t last_signal_fail_warn_ms = 0;
     uint16_t prev_front_dist = 0;
     bool prev_front_valid = false;
-    int forward_measure_fail_streak = 0;
+    int move_measure_fail_streak = 0;
 
     while (true) {
-        const bool moving_forward = active_ && motor_ != nullptr && motor_->IsMovingForward();
+        const bool motor_moving = active_ && motor_ != nullptr && motor_->IsMoving();
         const bool use_cal = tof.IsCalibrated();
         const int cal_mm = use_cal ? tof.CalibratedDistanceMm() : 0;
 
-        if (moving_forward != was_moving_forward) {
-            ESP_LOGI(TAG, "Motor forward=%d (left=%d right=%d) cal_ref=%d", moving_forward,
+        if (motor_moving != was_moving) {
+            ESP_LOGI(TAG, "Motor moving=%d (left=%d right=%d) cal_ref=%d", motor_moving,
                      motor_ ? motor_->LeftSpeed() : 0, motor_ ? motor_->RightSpeed() : 0, cal_mm);
-            was_moving_forward = moving_forward;
+            was_moving = motor_moving;
             last_debug_log_ms = 0;
             prev_front_dist = 0;
             prev_front_valid = false;
-            forward_measure_fail_streak = 0;
+            move_measure_fail_streak = 0;
         }
 
         const int64_t now_ms = esp_timer_get_time() / 1000;
         const int debug_interval_ms =
-            moving_forward ? TOF_DEBUG_MOVE_LOG_MS : TOF_DEBUG_IDLE_LOG_MS;
+            motor_moving ? TOF_DEBUG_MOVE_LOG_MS : TOF_DEBUG_IDLE_LOG_MS;
         const bool should_measure =
-            moving_forward || (TOF_DEBUG_LOG && (now_ms - last_debug_log_ms >= debug_interval_ms));
+            motor_moving || (TOF_DEBUG_LOG && (now_ms - last_debug_log_ms >= debug_interval_ms));
 
         if (active_ && should_measure && !tof.IsIoBusy()) {
             vl53l0x_data_t front = {};
@@ -278,21 +278,21 @@ void TofMotorGuard::PollOnce() {
             }
 
             if (!front_ok) {
-                if (moving_forward) {
-                    forward_measure_fail_streak++;
+                if (motor_moving) {
+                    move_measure_fail_streak++;
                 }
                 if (now_ms - last_debug_log_ms >= debug_interval_ms) {
-                    ESP_LOGW(TAG, "Front measure failed (forward=%d streak=%d)", moving_forward,
-                             forward_measure_fail_streak);
+                    ESP_LOGW(TAG, "Front measure failed (moving=%d streak=%d)", motor_moving,
+                             move_measure_fail_streak);
                     last_debug_log_ms = now_ms;
                 }
             } else {
-                forward_measure_fail_streak = 0;
+                move_measure_fail_streak = 0;
                 if (TOF_DEBUG_LOG && (now_ms - last_debug_log_ms >= debug_interval_ms)) {
                     if (front.valid || (now_ms - last_signal_fail_warn_ms >= 5000)) {
-                        LogFrontSample(moving_forward ? "Move" : "Idle", front, cal_mm, use_cal);
+                        LogFrontSample(motor_moving ? "Move" : "Idle", front, cal_mm, use_cal);
                         if (rear_ok && tof.HasRearSensor()) {
-                            LogRearSample(moving_forward ? "Move" : "Idle", rear);
+                            LogRearSample(motor_moving ? "Move" : "Idle", rear);
                         }
                         last_debug_log_ms = now_ms;
                         if (!front.valid) {
@@ -302,7 +302,7 @@ void TofMotorGuard::PollOnce() {
                 }
             }
 
-            if (moving_forward) {
+            if (motor_moving) {
                 StopReason reason = StopReason::None;
                 if (front_ok && SampleUsable(front)) {
                     if (use_cal && cal_mm > 0) {
@@ -314,8 +314,8 @@ void TofMotorGuard::PollOnce() {
                     prev_front_valid = true;
                 } else if (front_ok) {
                     // Measure OK at API level but invalid sample (8191/signal fail) — ignore for stop.
-                    forward_measure_fail_streak++;
-                } else if (forward_measure_fail_streak >= 3) {
+                    move_measure_fail_streak++;
+                } else if (move_measure_fail_streak >= 3) {
                     reason = StopReason::Obstacle;
                 }
                 if (reason == StopReason::None && tof.HasRearSensor() && rear_ok) {
@@ -326,10 +326,10 @@ void TofMotorGuard::PollOnce() {
                              StopReasonName(reason), front.distance_mm, cal_mm, front.valid,
                              rear_ok ? rear.distance_mm : 0U);
                     motor_->Stop();
-                    was_moving_forward = false;
+                    was_moving = false;
                     prev_front_dist = 0;
                     prev_front_valid = false;
-                    forward_measure_fail_streak = 0;
+                    move_measure_fail_streak = 0;
                 }
             }
         }
