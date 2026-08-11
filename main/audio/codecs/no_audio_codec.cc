@@ -14,9 +14,25 @@
 #define AUDIO_MIC_SHIFT_BITS 12
 #endif
 
+#ifndef AUDIO_MIC_SOFT_LIMIT
+#define AUDIO_MIC_SOFT_LIMIT 0
+#endif
+
 #define TAG "NoAudioCodec"
 
 namespace {
+
+void SoftLimitPcm(int16_t* dest, int samples) {
+#if AUDIO_MIC_SOFT_LIMIT > 0
+    for (int i = 0; i < samples; i++) {
+        if (dest[i] > AUDIO_MIC_SOFT_LIMIT) {
+            dest[i] = AUDIO_MIC_SOFT_LIMIT;
+        } else if (dest[i] < -AUDIO_MIC_SOFT_LIMIT) {
+            dest[i] = static_cast<int16_t>(-AUDIO_MIC_SOFT_LIMIT);
+        }
+    }
+#endif
+}
 
 void ApplyInputGain(int16_t* dest, int samples, float gain) {
     if (samples <= 0 || gain <= 0.0f || gain == 1.0f) {
@@ -53,9 +69,9 @@ void LogMicLevels(int samples, int32_t raw_peak, int32_t pre_gain_peak, int32_t 
         } else {
             hint = "HOT — TTS echo/noise; shift++ or half-duplex";
         }
-    } else if (pre_gain_peak < 200) {
-        hint = "SILENT — wiring/L/R?";
-    } else if (pre_gain_peak < 1500) {
+    } else if (post_gain_peak < 350) {
+        hint = "quiet idle";
+    } else if (post_gain_peak < 3000) {
         hint = "weak — raise gain slightly";
     }
 
@@ -341,6 +357,7 @@ int NoAudioCodec::Read(int16_t* dest, int samples) {
     }
 
     ApplyInputGain(dest, samples, input_gain_);
+    SoftLimitPcm(dest, samples);
 #if AUDIO_MIC_DEBUG_LOG
     int32_t post_gain_peak = 0;
     for (int i = 0; i < samples; i++) {
@@ -481,5 +498,6 @@ int NoAudioCodecSimplexPdm::Read(int16_t* dest, int samples) {
 
     samples = bytes_read / sizeof(int16_t);
     ApplyInputGain(dest, samples, input_gain_);
+    SoftLimitPcm(dest, samples);
     return samples;
 }

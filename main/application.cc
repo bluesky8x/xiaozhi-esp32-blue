@@ -711,7 +711,10 @@ void Application::InitializeProtocol() {
     });
 
     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
-        if (GetDeviceState() == kDeviceStateSpeaking) {
+        // Accept downlink while listening or speaking. tts start may still be queued on the
+        // main loop; dropping packets here causes "text on screen, no speaker" symptoms.
+        const auto state = GetDeviceState();
+        if (state == kDeviceStateSpeaking || state == kDeviceStateListening) {
             audio_service_.PushPacketToDecodeQueue(std::move(packet));
         }
     });
@@ -749,20 +752,17 @@ void Application::InitializeProtocol() {
                 return;
             }
             if (strcmp(state->valuestring, "start") == 0) {
-                Schedule([this]() {
-                    aborted_ = false;
-                    SetDeviceState(kDeviceStateSpeaking);
-                });
+                aborted_ = false;
+                audio_service_.ResetDecoder();
+                SetDeviceState(kDeviceStateSpeaking);
             } else if (strcmp(state->valuestring, "stop") == 0) {
-                Schedule([this]() {
-                    if (GetDeviceState() == kDeviceStateSpeaking) {
-                        if (listening_mode_ == kListeningModeManualStop) {
-                            SetDeviceState(kDeviceStateIdle);
-                        } else {
-                            SetDeviceState(kDeviceStateListening);
-                        }
+                if (GetDeviceState() == kDeviceStateSpeaking) {
+                    if (listening_mode_ == kListeningModeManualStop) {
+                        SetDeviceState(kDeviceStateIdle);
+                    } else {
+                        SetDeviceState(kDeviceStateListening);
                     }
-                });
+                }
             } else if (strcmp(state->valuestring, "sentence_start") == 0) {
                 auto text = cJSON_GetObjectItem(root, "text");
                 if (cJSON_IsString(text)) {
@@ -800,6 +800,12 @@ void Application::InitializeProtocol() {
                 Schedule([display, emotion_str = std::string(emotion->valuestring)]() {
                     display->SetEmotion(emotion_str.c_str());
                 });
+            }
+        } else if (strcmp(type->valuestring, "behavior") == 0) {
+            // Character behavior engine (server-side); no-op on Otto bench until wired.
+            auto actions = cJSON_GetObjectItem(root, "actions");
+            if (cJSON_IsArray(actions)) {
+                ESP_LOGD(TAG, "behavior actions=%d (ignored on this board)", cJSON_GetArraySize(actions));
             }
         } else if (strcmp(type->valuestring, "mcp") == 0) {
             auto payload = cJSON_GetObjectItem(root, "payload");
@@ -1199,7 +1205,6 @@ void Application::HandleStateChangedEvent() {
                 // Only AFE wake word can be detected in speaking mode
                 audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());
             }
-            audio_service_.ResetDecoder();
             break;
         case kDeviceStateWifiConfiguring:
             audio_service_.EnableVoiceProcessing(false);

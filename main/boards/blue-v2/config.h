@@ -96,9 +96,10 @@
 #define MOTOR_RIGHT_IN2  GPIO_NUM_11
 #define MOTOR_AUTO_STOP_MS 5000
 
-// INMP441: shift 13 = headroom vs clip; gain 1.0 = no extra boost.
-#define AUDIO_MIC_SHIFT_BITS      13
-#define AUDIO_MIC_INPUT_GAIN      1.0f
+// INMP441 (L/R→GND): shift 12 + gain 1.75 + soft-limit 24k — uplink level vs clip (WAV analysis).
+#define AUDIO_MIC_SHIFT_BITS      12
+#define AUDIO_MIC_INPUT_GAIN      1.75f
+#define AUDIO_MIC_SOFT_LIMIT      24000
 
 // Mic level debug on serial (~1 Hz): peak/RMS while I2S input active (Blue V2 bring-up).
 #define AUDIO_MIC_DEBUG_LOG         1
