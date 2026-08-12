@@ -1,4 +1,8 @@
 #include "audio_service.h"
+
+#if CONFIG_BOARD_TYPE_BLUE_V2
+#include "motor_controller.h"
+#endif
 #include <esp_log.h>
 #include <cstring>
 
@@ -534,6 +538,12 @@ void AudioService::SetDecodeSampleRate(int sample_rate, int frame_duration) {
 }
 
 void AudioService::PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t>&& pcm) {
+#if CONFIG_BOARD_TYPE_BLUE_V2
+    if (type == kAudioTaskTypeEncodeToSendQueue && MotorController::ShouldPauseUplink()) {
+        return;
+    }
+#endif
+
     auto task = std::make_unique<AudioTask>();
     task->type = type;
     task->pcm = std::move(pcm);

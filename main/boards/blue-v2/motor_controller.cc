@@ -1,0 +1,347 @@
+#include "motor_controller.h"
+
+#include "application.h"
+#include "mcp_server.h"
+
+#include <algorithm>
+#include <esp_timer.h>
+
+MotorController* MotorController::instance_ = nullptr;
+
+MotorController::MotorController(gpio_num_t left_in1, gpio_num_t left_in2, gpio_num_t right_in1,
+                                 gpio_num_t right_in2)
+    : left_in1_(left_in1),
+      left_in2_(left_in2),
+      right_in1_(right_in1),
+      right_in2_(right_in2) {
+    instance_ = this;
+    InitMotorGpio();
+
+    cmd_queue_ = xQueueCreate(MOTOR_CMD_QUEUE_DEPTH, sizeof(MotorCommand));
+    ESP_ERROR_CHECK(cmd_queue_ != nullptr ? ESP_OK : ESP_ERR_NO_MEM);
+
+    esp_timer_create_args_t timer_args = {
+        .callback = StopTimerCallback,
+        .arg = this,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "motor_stop",
+        .skip_unhandled_events = true,
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&timer_args, &stop_timer_));
+
+    constexpr uint32_t kStackWords = 3072;
+    constexpr UBaseType_t kPriority = 3;
+    BaseType_t created = xTaskCreatePinnedToCore(WorkerTaskEntry, "motor_worker", kStackWords, this,
+                                                 kPriority, &worker_task_, 0);
+    ESP_ERROR_CHECK(created == pdPASS ? ESP_OK : ESP_FAIL);
+
+    RegisterMcpTools();
+
+    ESP_LOGI(MOTOR_TAG,
+             "Motor worker started (queue=%d, GPIO %d/%d/%d/%d, brake=%d %dms, max_duty=%d%%)",
+             MOTOR_CMD_QUEUE_DEPTH, left_in1_, left_in2_, right_in1_, right_in2_, MOTOR_BRAKE_ENABLE,
+             MOTOR_BRAKE_MS, MOTOR_MAX_DUTY_PCT);
+}
+
+MotorController::~MotorController() {
+    if (stop_timer_ != nullptr) {
+        esp_timer_stop(stop_timer_);
+        esp_timer_delete(stop_timer_);
+        stop_timer_ = nullptr;
+    }
+    if (worker_task_ != nullptr) {
+        vTaskDelete(worker_task_);
+        worker_task_ = nullptr;
+    }
+    ExecuteStop();
+    if (cmd_queue_ != nullptr) {
+        vQueueDelete(cmd_queue_);
+        cmd_queue_ = nullptr;
+    }
+    if (instance_ == this) {
+        instance_ = nullptr;
+    }
+}
+
+bool MotorController::ShouldPauseUplink() {
+    return instance_ != nullptr && instance_->IsMoving();
+}
+
+void MotorController::WorkerTaskEntry(void* arg) {
+    static_cast<MotorController*>(arg)->WorkerLoop();
+}
+
+void MotorController::WorkerLoop() {
+    MotorCommand cmd{};
+    while (true) {
+        if (xQueueReceive(cmd_queue_, &cmd, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+        if (cmd.type == CmdType::kStop) {
+            ExecuteStop();
+        } else {
+            ExecuteMove(cmd.left, cmd.right, cmd.duration_ms);
+        }
+    }
+}
+
+void MotorController::StopTimerCallback(void* arg) {
+    static_cast<MotorController*>(arg)->EnqueueStopFromTimer();
+}
+
+void MotorController::EnqueueStopFromTimer() {
+    MotorCommand cmd = {
+        .type = CmdType::kStop,
+        .left = 0,
+        .right = 0,
+        .duration_ms = 0,
+    };
+    PushCommand(cmd, true);
+}
+
+bool MotorController::PushCommand(const MotorCommand& cmd, bool clear_pending) {
+    if (cmd_queue_ == nullptr) {
+        return false;
+    }
+    if (clear_pending) {
+        xQueueReset(cmd_queue_);
+    }
+    if (xQueueSend(cmd_queue_, &cmd, 0) != pdTRUE) {
+        ESP_LOGW(MOTOR_TAG, "Motor command queue full (type=%d)", static_cast<int>(cmd.type));
+        return false;
+    }
+    return true;
+}
+
+bool MotorController::EnqueueMove(int left_speed, int right_speed, int duration_ms) {
+    left_speed = std::clamp(left_speed, -100, 100);
+    right_speed = std::clamp(right_speed, -100, 100);
+    duration_ms = std::clamp(duration_ms, 0, 10000);
+    MotorCommand cmd = {
+        .type = CmdType::kMove,
+        .left = static_cast<int8_t>(left_speed),
+        .right = static_cast<int8_t>(right_speed),
+        .duration_ms = static_cast<int16_t>(duration_ms),
+    };
+    return PushCommand(cmd, false);
+}
+
+bool MotorController::EnqueueStop() {
+    MotorCommand cmd = {
+        .type = CmdType::kStop,
+        .left = 0,
+        .right = 0,
+        .duration_ms = 0,
+    };
+    return PushCommand(cmd, true);
+}
+
+int* MotorController::LevelCacheFor(gpio_num_t pin) {
+    if (pin == left_in1_) {
+        return &cached_level_left_in1_;
+    }
+    if (pin == left_in2_) {
+        return &cached_level_left_in2_;
+    }
+    if (pin == right_in1_) {
+        return &cached_level_right_in1_;
+    }
+    if (pin == right_in2_) {
+        return &cached_level_right_in2_;
+    }
+    return nullptr;
+}
+
+void MotorController::ResetLevelCache() {
+    cached_level_left_in1_ = -1;
+    cached_level_left_in2_ = -1;
+    cached_level_right_in1_ = -1;
+    cached_level_right_in2_ = -1;
+}
+
+void MotorController::SetMotorPin(gpio_num_t pin, int level) {
+    int* cache = LevelCacheFor(pin);
+    if (cache != nullptr && *cache == level) {
+        return;
+    }
+    gpio_set_level(pin, level);
+    if (cache != nullptr) {
+        *cache = level;
+    }
+}
+
+void MotorController::InitMotorGpio() {
+    if (gpio_initialized_) {
+        return;
+    }
+    const gpio_num_t pins[] = {left_in1_, left_in2_, right_in1_, right_in2_};
+    for (gpio_num_t pin : pins) {
+        gpio_reset_pin(pin);
+        gpio_set_direction(pin, GPIO_MODE_OUTPUT);
+        gpio_set_level(pin, 0);
+    }
+    ResetLevelCache();
+    cached_level_left_in1_ = 0;
+    cached_level_left_in2_ = 0;
+    cached_level_right_in1_ = 0;
+    cached_level_right_in2_ = 0;
+    gpio_initialized_ = true;
+    ESP_LOGI(MOTOR_TAG, "Motor GPIO outputs ready on %d/%d/%d/%d (no LEDC)", left_in1_, left_in2_,
+             right_in1_, right_in2_);
+}
+
+void MotorController::CoastSide(gpio_num_t in1, gpio_num_t in2) {
+    SetMotorPin(in1, 0);
+    SetMotorPin(in2, 0);
+}
+
+void MotorController::BrakeSide(gpio_num_t in1, gpio_num_t in2) {
+    SetMotorPin(in1, 1);
+    SetMotorPin(in2, 1);
+}
+
+void MotorController::DriveSide(gpio_num_t in1, gpio_num_t in2, int speed) {
+    speed = std::clamp(speed, -100, 100);
+    if (speed == 0) {
+        CoastSide(in1, in2);
+        return;
+    }
+    if (speed > 0) {
+        SetMotorPin(in1, 1);
+        SetMotorPin(in2, 0);
+    } else {
+        SetMotorPin(in1, 0);
+        SetMotorPin(in2, 1);
+    }
+}
+
+void MotorController::ScheduleAutoStop(int duration_ms) {
+    if (stop_timer_ == nullptr || duration_ms <= 0) {
+        return;
+    }
+    esp_timer_stop(stop_timer_);
+    esp_timer_start_once(stop_timer_, static_cast<uint64_t>(duration_ms) * 1000);
+}
+
+void MotorController::ExecuteMove(int left_speed, int right_speed, int duration_ms) {
+    InitMotorGpio();
+    left_speed_.store(left_speed, std::memory_order_release);
+    right_speed_.store(right_speed, std::memory_order_release);
+    moving_.store(left_speed != 0 || right_speed != 0, std::memory_order_release);
+    DriveSide(left_in1_, left_in2_, left_speed);
+    DriveSide(right_in1_, right_in2_, right_speed);
+    ESP_LOGI(MOTOR_TAG, "Move left=%d right=%d duration=%dms", left_speed, right_speed, duration_ms);
+    if (left_speed == 0 && right_speed == 0) {
+        esp_timer_stop(stop_timer_);
+    } else {
+        ScheduleAutoStop(duration_ms);
+    }
+}
+
+void MotorController::NotifyStoppedOnMain() {
+#if CONFIG_BOARD_TYPE_BLUE_V2
+    Application::GetInstance().ScheduleListeningResyncAfterRobotAction();
+#endif
+}
+
+void MotorController::ExecuteStop() {
+    esp_timer_stop(stop_timer_);
+    const bool was_moving = moving_.exchange(false, std::memory_order_acq_rel);
+    left_speed_.store(0, std::memory_order_release);
+    right_speed_.store(0, std::memory_order_release);
+    if (gpio_initialized_) {
+#if MOTOR_BRAKE_ENABLE
+        if (was_moving) {
+            BrakeSide(left_in1_, left_in2_);
+            BrakeSide(right_in1_, right_in2_);
+            vTaskDelay(pdMS_TO_TICKS(MOTOR_BRAKE_MS));
+            ESP_LOGI(MOTOR_TAG, "Motors brake %dms then coast", MOTOR_BRAKE_MS);
+        }
+#endif
+        CoastSide(left_in1_, left_in2_);
+        CoastSide(right_in1_, right_in2_);
+    }
+    if (!was_moving) {
+        ESP_LOGI(MOTOR_TAG, "Motors stopped");
+        return;
+    }
+    NotifyStoppedOnMain();
+}
+
+void MotorController::RegisterMcpTools() {
+    auto& mcp_server = McpServer::GetInstance();
+
+    mcp_server.AddTool("self.motor.stop", "Stop all motors. Use for: dừng, dừng lại, stop.", PropertyList(),
+                       [this](const PropertyList&) -> ReturnValue { return EnqueueStop(); });
+
+    mcp_server.AddTool("self.motor.forward",
+                       "Move robot forward. Use for: đi tới, tiến, đi thẳng, go forward.",
+                       PropertyList(),
+                       [this](const PropertyList&) -> ReturnValue {
+                           return EnqueueMove(100, 100, MOTOR_AUTO_STOP_MS);
+                       });
+
+    mcp_server.AddTool("self.motor.backward",
+                       "Move robot backward. Use for: lùi, đi lùi, go back.",
+                       PropertyList(),
+                       [this](const PropertyList&) -> ReturnValue {
+                           return EnqueueMove(-100, -100, MOTOR_AUTO_STOP_MS);
+                       });
+
+    mcp_server.AddTool("self.motor.turn_left",
+                       "Turn robot left in place. Use for: quay sang trái, rẽ trái, turn left.",
+                       PropertyList(),
+                       [this](const PropertyList&) -> ReturnValue {
+                           return EnqueueMove(-100, 100, MOTOR_AUTO_STOP_MS);
+                       });
+
+    mcp_server.AddTool("self.motor.turn_right",
+                       "Turn robot right in place. Use for: quay sang phải, rẽ phải, turn right.",
+                       PropertyList(),
+                       [this](const PropertyList&) -> ReturnValue {
+                           return EnqueueMove(100, -100, MOTOR_AUTO_STOP_MS);
+                       });
+
+    mcp_server.AddTool(
+        "self.motor.move",
+        "Drive straight or turn. left/right sign = direction (-100..100), full speed when non-zero. "
+        "For circle use self.motor.circle. duration_ms auto-stop (100-10000).",
+        PropertyList({Property("left", kPropertyTypeInteger, 0, -100, 100),
+                      Property("right", kPropertyTypeInteger, 0, -100, 100),
+                      Property("duration_ms", kPropertyTypeInteger, MOTOR_AUTO_STOP_MS, 100, 10000)}),
+        [this](const PropertyList& properties) -> ReturnValue {
+            const int left = properties["left"].value<int>();
+            const int right = properties["right"].value<int>();
+            const int duration_ms = properties["duration_ms"].value<int>();
+            return EnqueueMove(left, right, duration_ms);
+        });
+
+    mcp_server.AddTool(
+        "self.motor.circle",
+        "Drive in a circle (left wheel reverse). duration_ms auto-stop (1000-30000).",
+        PropertyList({Property("duration_ms", kPropertyTypeInteger, MOTOR_AUTO_STOP_MS, 1000, 30000)}),
+        [this](const PropertyList& properties) -> ReturnValue {
+            const int duration_ms = properties["duration_ms"].value<int>();
+            return EnqueueMove(-100, 100, duration_ms);
+        });
+
+    mcp_server.AddTool("self.chassis.go_forward", "Move forward", PropertyList(),
+                       [this](const PropertyList&) -> ReturnValue {
+                           return EnqueueMove(100, 100, MOTOR_AUTO_STOP_MS);
+                       });
+
+    mcp_server.AddTool("self.chassis.go_back", "Move backward", PropertyList(),
+                       [this](const PropertyList&) -> ReturnValue {
+                           return EnqueueMove(-100, -100, MOTOR_AUTO_STOP_MS);
+                       });
+
+    mcp_server.AddTool("self.chassis.turn_left", "Turn left", PropertyList(),
+                       [this](const PropertyList&) -> ReturnValue {
+                           return EnqueueMove(-100, 100, MOTOR_AUTO_STOP_MS);
+                       });
+
+    mcp_server.AddTool("self.chassis.turn_right", "Turn right", PropertyList(),
+                       [this](const PropertyList&) -> ReturnValue {
+                           return EnqueueMove(100, -100, MOTOR_AUTO_STOP_MS);
+                       });
+}

@@ -325,7 +325,7 @@ void TofMotorGuard::PollOnce() {
                     ESP_LOGW(TAG, ">>> STOP %s front=%u mm cal_ref=%d valid=%d rear=%u mm",
                              StopReasonName(reason), front.distance_mm, cal_mm, front.valid,
                              rear_ok ? rear.distance_mm : 0U);
-                    motor_->Stop();
+                    motor_->EnqueueStop();
                     was_moving = false;
                     prev_front_dist = 0;
                     prev_front_valid = false;

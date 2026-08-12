@@ -879,6 +879,7 @@ if(CONFIG_BOARD_TYPE_BLUE_V2)
         ${CMAKE_CURRENT_SOURCE_DIR}/boards/otto-robot/otto_emoji_display.cc
         ${CMAKE_CURRENT_SOURCE_DIR}/boards/otto-robot/otto_icon_font.c
         ${CMAKE_CURRENT_SOURCE_DIR}/boards/blue-v2/blue_v2_otto_display.cc)
+    list(APPEND INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/boards/blue-v2)
 endif()
 list(APPEND SOURCES ${BOARD_SOURCES})
 
