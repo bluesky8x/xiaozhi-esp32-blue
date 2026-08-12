@@ -1143,6 +1143,16 @@ void Application::StartListeningAudio() {
         return;
     }
 
+    static constexpr int64_t kListenStartDebounceUs = 2 * 1000000;
+    const int64_t now_us = esp_timer_get_time();
+    if (audio_service_.IsAudioProcessorRunning() &&
+        last_listen_start_us_ != 0 &&
+        (now_us - last_listen_start_us_) < kListenStartDebounceUs) {
+        ESP_LOGD(TAG, "StartListeningAudio debounced");
+        return;
+    }
+    last_listen_start_us_ = now_us;
+
     // Send the start listening command
     protocol_->SendStartListening(listening_mode_);
     audio_service_.EnableVoiceProcessing(true);
@@ -1167,14 +1177,19 @@ void Application::EnsureListeningAfterRobotAction() {
         ESP_LOGW(TAG, "Listen re-sync skipped: audio channel closed");
         return;
     }
+    if (audio_service_.IsAudioProcessorRunning()) {
+        pending_listening_start_ = false;
+        ESP_LOGD(TAG, "Listen re-sync skipped: voice processing active");
+        return;
+    }
     pending_listening_start_ = false;
     StartListeningAudio();
     ESP_LOGI(TAG, "Listening re-synced after robot action");
 }
 
 void Application::ScheduleListeningResyncAfterRobotAction() {
-    Schedule([this]() { EnsureListeningAfterRobotAction(); });
-
+    // Delayed backup only — immediate resync duplicates HandleStateChangedEvent /
+    // StartListeningAudio and wipes server ASR buffer via extra listen start.
     static esp_timer_handle_t resync_timer = nullptr;
     if (resync_timer == nullptr) {
         esp_timer_create_args_t args = {
