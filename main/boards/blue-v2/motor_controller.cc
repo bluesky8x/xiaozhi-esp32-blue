@@ -244,7 +244,7 @@ void MotorController::ExecuteMove(int left_speed, int right_speed, int duration_
 
 void MotorController::NotifyStoppedOnMain() {
 #if CONFIG_BOARD_TYPE_BLUE_V2
-    Application::GetInstance().ScheduleListeningResyncAfterRobotAction();
+    Application::GetInstance().ScheduleListeningResyncAfterMotorStop();
 #endif
 }
 

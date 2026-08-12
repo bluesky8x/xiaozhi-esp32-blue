@@ -458,9 +458,13 @@ int NoAudioCodec::Read(int16_t* dest, int samples) {
     constexpr uint32_t kReadTimeoutMs = 200;
 
     std::vector<int32_t> bit32_buffer(samples);
-    const bool read_ok =
-        i2s_channel_read(rx_handle_, bit32_buffer.data(), samples * sizeof(int32_t), &bytes_read,
-                         kReadTimeoutMs) == ESP_OK;
+    bool read_ok = false;
+    {
+        std::lock_guard<std::mutex> lock(data_if_mutex_);
+        read_ok =
+            i2s_channel_read(rx_handle_, bit32_buffer.data(), samples * sizeof(int32_t),
+                             &bytes_read, kReadTimeoutMs) == ESP_OK;
+    }
 
 #if AUDIO_MIC_DEBUG_LOG
     if (!read_ok) {

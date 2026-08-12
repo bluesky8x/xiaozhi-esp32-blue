@@ -309,6 +309,23 @@ void Application::Run() {
             auto display = Board::GetInstance().GetDisplay();
             display->UpdateStatusBar();
 
+            // Recover if server never sends tts stop after playback finishes.
+            if (GetDeviceState() == kDeviceStateSpeaking &&
+                audio_service_.IsPlaybackIdle()) {
+                const int64_t now_us = esp_timer_get_time();
+                if (speaking_playback_idle_since_us_ == 0) {
+                    speaking_playback_idle_since_us_ = now_us;
+                } else if (now_us - speaking_playback_idle_since_us_ > 10 * 1000000LL) {
+                    ESP_LOGW(TAG,
+                             "Speaking stuck with idle playback — forcing listening");
+                    speaking_playback_idle_since_us_ = 0;
+                    SetDeviceState(kDeviceStateListening);
+                    ScheduleListeningResyncAfterRobotAction();
+                }
+            } else {
+                speaking_playback_idle_since_us_ = 0;
+            }
+
             // Print debug info every 10 seconds
             if (clock_ticks_ % 10 == 0) {
                 SystemInfo::PrintHeapStats();
@@ -1116,6 +1133,7 @@ void Application::HandleStateChangedEvent() {
             break;
         case kDeviceStateSpeaking:
             display->SetStatus(Lang::Strings::SPEAKING);
+            speaking_playback_idle_since_us_ = 0;
 
             if (listening_mode_ != kListeningModeRealtime) {
                 audio_service_.EnableVoiceProcessing(false);
@@ -1166,6 +1184,23 @@ void Application::StartListeningAudio() {
     }
 }
 
+void Application::ResyncListeningAfterMotorStop() {
+    if (GetDeviceState() != kDeviceStateListening) {
+        ESP_LOGW(TAG, "Motor listen re-sync skipped: state=%s",
+                 DeviceStateMachine::GetStateName(GetDeviceState()));
+        return;
+    }
+    if (!protocol_ || !protocol_->IsAudioChannelOpened()) {
+        ESP_LOGW(TAG, "Motor listen re-sync skipped: audio channel closed");
+        return;
+    }
+
+    pending_listening_start_ = false;
+    last_listen_start_us_ = 0;
+    StartListeningAudio();
+    ESP_LOGI(TAG, "Listening re-synced after motor stop");
+}
+
 void Application::EnsureListeningAfterRobotAction() {
     const auto state = GetDeviceState();
     if (state != kDeviceStateListening) {
@@ -1185,6 +1220,27 @@ void Application::EnsureListeningAfterRobotAction() {
     pending_listening_start_ = false;
     StartListeningAudio();
     ESP_LOGI(TAG, "Listening re-synced after robot action");
+}
+
+void Application::ScheduleListeningResyncAfterMotorStop() {
+    static esp_timer_handle_t motor_resync_timer = nullptr;
+    if (motor_resync_timer == nullptr) {
+        esp_timer_create_args_t args = {
+            .callback =
+                [](void* /*arg*/) {
+                    Application::GetInstance().Schedule([]() {
+                        Application::GetInstance().ResyncListeningAfterMotorStop();
+                    });
+                },
+            .arg = nullptr,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "motor_listen_resync",
+            .skip_unhandled_events = true,
+        };
+        ESP_ERROR_CHECK(esp_timer_create(&args, &motor_resync_timer));
+    }
+    esp_timer_stop(motor_resync_timer);
+    ESP_ERROR_CHECK(esp_timer_start_once(motor_resync_timer, 500000));
 }
 
 void Application::ScheduleListeningResyncAfterRobotAction() {

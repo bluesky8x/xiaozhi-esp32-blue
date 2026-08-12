@@ -85,6 +85,9 @@ public:
     /** Re-sync listen/voice processing after motor MCP (immediate + delayed retries). */
     void ScheduleListeningResyncAfterRobotAction();
 
+    /** Force listen start after physical motor stop — resets server ASR/VAD buffer. */
+    void ScheduleListeningResyncAfterMotorStop();
+
     /**
      * Alert with status, message, emotion and optional sound
      */
@@ -153,6 +156,7 @@ private:
     bool play_popup_on_listening_ = false;  // Flag to play popup sound after state changes to listening
     bool pending_listening_start_ = false;  // Waiting for playback to drain before starting listening (auto mode)
     int64_t last_listen_start_us_ = 0;  // Debounce duplicate SendStartListening (robot resync)
+    int64_t speaking_playback_idle_since_us_ = 0;  // Watchdog: speaking with no playback
     bool defer_blue_v2_heavy_init_ = false;  // Defer motor PWM + I2S until activation (SPI flush safe)
     int clock_ticks_ = 0;
     TaskHandle_t activation_task_handle_ = nullptr;
@@ -173,6 +177,7 @@ private:
     void StartListeningAudio();
     void ConfigureWakeWordForListening();
     void EnsureListeningAfterRobotAction();
+    void ResyncListeningAfterMotorStop();
 
     // Activation task (runs in background)
     void ActivationTask();
