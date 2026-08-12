@@ -4,6 +4,7 @@
 #include "tof_controller.h"
 
 #include <cstdlib>
+#include <climits>
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
@@ -240,6 +241,7 @@ void TofMotorGuard::TaskEntry(void* arg) {
 void TofMotorGuard::PollOnce() {
     auto& tof = TofController::Instance();
     bool was_moving = false;
+    int64_t motor_move_started_ms = 0;
     int64_t last_debug_log_ms = 0;
     int64_t last_signal_fail_warn_ms = 0;
     uint16_t prev_front_dist = 0;
@@ -251,48 +253,57 @@ void TofMotorGuard::PollOnce() {
         const bool use_cal = tof.IsCalibrated();
         const int cal_mm = use_cal ? tof.CalibratedDistanceMm() : 0;
 
+        const int64_t now_ms = esp_timer_get_time() / 1000;
+
         if (motor_moving != was_moving) {
             ESP_LOGI(TAG, "Motor moving=%d (left=%d right=%d) cal_ref=%d", motor_moving,
                      motor_ ? motor_->LeftSpeed() : 0, motor_ ? motor_->RightSpeed() : 0, cal_mm);
+            if (motor_moving) {
+                motor_move_started_ms = now_ms;
+                move_measure_fail_streak = 0;
+            }
             was_moving = motor_moving;
             last_debug_log_ms = 0;
             prev_front_dist = 0;
             prev_front_valid = false;
-            move_measure_fail_streak = 0;
         }
 
-        const int64_t now_ms = esp_timer_get_time() / 1000;
-        const int debug_interval_ms =
-            motor_moving ? TOF_DEBUG_MOVE_LOG_MS : TOF_DEBUG_IDLE_LOG_MS;
-        const bool should_measure =
-            motor_moving || (TOF_DEBUG_LOG && (now_ms - last_debug_log_ms >= debug_interval_ms));
+        const int debug_interval_ms = TOF_DEBUG_MOVE_LOG_MS;
+        const bool should_check = motor_moving;
 
-        if (active_ && should_measure && !tof.IsIoBusy()) {
-            vl53l0x_data_t front = {};
-            const bool front_ok = tof.MeasureFront(&front);
+        if (active_ && should_check) {
+            TofSnapshot snap{};
+            const bool have_snap = tof.GetLatestSnapshot(&snap);
+            const int64_t snap_age_ms =
+                have_snap ? (now_ms - snap.timestamp_ms) : INT64_MAX;
+            const int64_t stale_limit_ms = static_cast<int64_t>(TOF_GUARD_POLL_MS * 4);
+            constexpr int64_t kMoveGraceMs = 800;
+            const bool in_move_grace =
+                motor_moving && motor_move_started_ms > 0 &&
+                (now_ms - motor_move_started_ms) < kMoveGraceMs;
 
-            vl53l0x_data_t rear = {};
-            bool rear_ok = false;
-            if (tof.HasRearSensor()) {
-                rear_ok = tof.MeasureRear(&rear);
-            }
+            const bool snap_fresh = have_snap && snap_age_ms <= stale_limit_ms;
+            const bool front_ok = snap_fresh && snap.front_ok;
+            const bool rear_ok = snap_fresh && snap.rear_ok;
+            const vl53l0x_data_t& front = snap.front;
+            const vl53l0x_data_t& rear = snap.rear;
 
             if (!front_ok) {
-                if (motor_moving) {
+                if (!in_move_grace) {
                     move_measure_fail_streak++;
                 }
-                if (now_ms - last_debug_log_ms >= debug_interval_ms) {
-                    ESP_LOGW(TAG, "Front measure failed (moving=%d streak=%d)", motor_moving,
-                             move_measure_fail_streak);
+                if (!in_move_grace && now_ms - last_debug_log_ms >= debug_interval_ms) {
+                    ESP_LOGW(TAG, "Front snapshot stale/missing (moving=1 age=%lld streak=%d)",
+                             static_cast<long long>(snap_age_ms), move_measure_fail_streak);
                     last_debug_log_ms = now_ms;
                 }
             } else {
                 move_measure_fail_streak = 0;
                 if (TOF_DEBUG_LOG && (now_ms - last_debug_log_ms >= debug_interval_ms)) {
                     if (front.valid || (now_ms - last_signal_fail_warn_ms >= 5000)) {
-                        LogFrontSample(motor_moving ? "Move" : "Idle", front, cal_mm, use_cal);
+                        LogFrontSample("Move", front, cal_mm, use_cal);
                         if (rear_ok && tof.HasRearSensor()) {
-                            LogRearSample(motor_moving ? "Move" : "Idle", rear);
+                            LogRearSample("Move", rear);
                         }
                         last_debug_log_ms = now_ms;
                         if (!front.valid) {
@@ -302,7 +313,7 @@ void TofMotorGuard::PollOnce() {
                 }
             }
 
-            if (motor_moving) {
+            if (!in_move_grace) {
                 StopReason reason = StopReason::None;
                 if (front_ok && SampleUsable(front)) {
                     if (use_cal && cal_mm > 0) {
@@ -313,20 +324,20 @@ void TofMotorGuard::PollOnce() {
                     prev_front_dist = front.distance_mm;
                     prev_front_valid = true;
                 } else if (front_ok) {
-                    // Measure OK at API level but invalid sample (8191/signal fail) — ignore for stop.
                     move_measure_fail_streak++;
-                } else if (move_measure_fail_streak >= 3) {
+                } else if (move_measure_fail_streak >= 8) {
                     reason = StopReason::Obstacle;
                 }
                 if (reason == StopReason::None && tof.HasRearSensor() && rear_ok) {
                     reason = CheckRearWhileMoving(rear);
                 }
                 if (reason != StopReason::None) {
-                    ESP_LOGW(TAG, ">>> STOP %s front=%u mm cal_ref=%d valid=%d rear=%u mm",
+                    ESP_LOGW(TAG, ">>> STOP %s front=%u mm cal_ref=%d valid=%d rear=%u mm age=%lld",
                              StopReasonName(reason), front.distance_mm, cal_mm, front.valid,
-                             rear_ok ? rear.distance_mm : 0U);
+                             rear_ok ? rear.distance_mm : 0U, static_cast<long long>(snap_age_ms));
                     motor_->EnqueueStop();
                     was_moving = false;
+                    motor_move_started_ms = 0;
                     prev_front_dist = 0;
                     prev_front_valid = false;
                     move_measure_fail_streak = 0;

@@ -248,10 +248,13 @@ void Application::Run() {
         if (bits & MAIN_EVENT_PLAYBACK_DRAINED) {
             // Deferred listening start (auto mode): the playback queue has
             // drained, so it is now safe to enable voice processing.
-            if (pending_listening_start_ && GetDeviceState() == kDeviceStateListening &&
+            if (GetDeviceState() == kDeviceStateListening &&
                 audio_service_.IsPlaybackIdle()) {
-                pending_listening_start_ = false;
-                StartListeningAudio();
+                if (pending_listening_start_ ||
+                    !audio_service_.IsAudioProcessorRunning()) {
+                    pending_listening_start_ = false;
+                    StartListeningAudio();
+                }
             }
         }
 
@@ -695,6 +698,9 @@ void Application::InitializeProtocol() {
                         SetDeviceState(kDeviceStateIdle);
                     } else {
                         SetDeviceState(kDeviceStateListening);
+                        // Startup greeting / TTS stop can race with playback drain;
+                        // retry listen start if voice processing did not come back.
+                        ScheduleListeningResyncAfterRobotAction();
                     }
                 }
             } else if (strcmp(state->valuestring, "sentence_start") == 0) {

@@ -2,6 +2,7 @@
 
 #include "application.h"
 #include "mcp_server.h"
+#include "tof_controller.h"
 
 #include <algorithm>
 #include <esp_timer.h>
@@ -231,6 +232,9 @@ void MotorController::ExecuteMove(int left_speed, int right_speed, int duration_
     DriveSide(left_in1_, left_in2_, left_speed);
     DriveSide(right_in1_, right_in2_, right_speed);
     ESP_LOGI(MOTOR_TAG, "Move left=%d right=%d duration=%dms", left_speed, right_speed, duration_ms);
+    if (left_speed != 0 || right_speed != 0) {
+        TofController::Instance().RequestFastSample();
+    }
     if (left_speed == 0 && right_speed == 0) {
         esp_timer_stop(stop_timer_);
     } else {

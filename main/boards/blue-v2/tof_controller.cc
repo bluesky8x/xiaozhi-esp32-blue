@@ -2,6 +2,7 @@
 
 #include "config.h"
 #include "mcp_server.h"
+#include "motor_controller.h"
 #include "settings.h"
 
 #include <cstdio>
@@ -293,16 +294,19 @@ void TofController::RegisterMcpTools() {
         "Read front VL53L0X distance in millimeters (debug).",
         PropertyList(),
         [this](const PropertyList&) -> ReturnValue {
-            vl53l0x_data_t sample = {};
-            if (!Measure(&sample)) {
+            TofSnapshot snap{};
+            if (!SampleOnDemand(&snap)) {
                 return std::string("{\"ok\":false,\"error\":\"measure_failed\"}");
             }
-            char buf[192];
+            char buf[256];
             snprintf(buf, sizeof(buf),
                      "{\"ok\":true,\"distance_mm\":%u,\"valid\":%s,\"range_status\":%u,"
-                     "\"calibrated\":%s,\"cal_distance_mm\":%ld}",
-                     sample.distance_mm, sample.valid ? "true" : "false", sample.range_status,
-                     calibrated_ ? "true" : "false", static_cast<long>(cal_distance_mm_));
+                     "\"calibrated\":%s,\"cal_distance_mm\":%ld,\"age_ms\":%lld,\"seq\":%lu}",
+                     snap.front.distance_mm, snap.front.valid ? "true" : "false",
+                     snap.front.range_status, calibrated_ ? "true" : "false",
+                     static_cast<long>(cal_distance_mm_),
+                     static_cast<long long>(esp_timer_get_time() / 1000 - snap.timestamp_ms),
+                     static_cast<unsigned long>(snap.sequence));
             return std::string(buf);
         });
 
@@ -339,6 +343,7 @@ bool TofController::Init() {
             ESP_LOGI(TAG, "Probe: dist=%u mm valid=%d status=%u (%s) signal=%.2f mcps",
                      probe.distance_mm, probe.valid, probe.range_status,
                      vl53l0x_range_status_str(probe.range_status), probe.signal_rate_mcps);
+            PublishSnapshot(true, probe, false, {});
             if (!probe.valid || probe.range_status == 2) {
                 ESP_LOGW(TAG, "Signal Fail — check: (1) remove sticker on lens (2) white target "
                               "10–30 cm in front (3) VCC 3.3V SDA/SCL 41/42 (4) then calibrate");
@@ -347,6 +352,113 @@ bool TofController::Init() {
     }
 
     ESP_LOGI(TAG, "ToF ready (calibrated=%d)", calibrated_);
+    StartSampler();
+    return true;
+}
+
+bool TofController::GetLatestSnapshot(TofSnapshot* out) const {
+    if (!out) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(snapshot_mutex_);
+    if (!snapshot_valid_) {
+        return false;
+    }
+    *out = latest_snapshot_;
+    return true;
+}
+
+void TofController::PublishSnapshot(bool front_ok, const vl53l0x_data_t& front, bool rear_ok,
+                                    const vl53l0x_data_t& rear) {
+    TofSnapshot snap{};
+    snap.front = front;
+    snap.rear = rear;
+    snap.front_ok = front_ok;
+    snap.rear_ok = rear_ok;
+    snap.has_rear = has_rear_;
+    snap.timestamp_ms = esp_timer_get_time() / 1000;
+    snap.sequence = snapshot_sequence_.fetch_add(1, std::memory_order_relaxed) + 1;
+    std::lock_guard<std::mutex> lock(snapshot_mutex_);
+    latest_snapshot_ = snap;
+    snapshot_valid_ = true;
+}
+
+void TofController::SamplerTaskEntry(void* arg) {
+    static_cast<TofController*>(arg)->SamplerLoop();
+}
+
+void TofController::SamplerLoop() {
+    ESP_LOGI(TAG, "ToF sampler: sample-on-move only (%dms while motors run)", TOF_GUARD_POLL_MS);
+    while (sampler_running_.load(std::memory_order_relaxed)) {
+        if (!ready_ || io_busy_) {
+            vTaskDelay(pdMS_TO_TICKS(TOF_GUARD_POLL_MS));
+            continue;
+        }
+
+        const bool motor_moving = MotorController::ShouldPauseUplink();
+        const bool fast = fast_sample_requested_.exchange(false, std::memory_order_acq_rel);
+
+        if (!motor_moving && !fast) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+
+        vl53l0x_data_t front = {};
+        const bool front_ok = MeasureFront(&front);
+
+        vl53l0x_data_t rear = {};
+        bool rear_ok = false;
+        if (has_rear_) {
+            rear_ok = MeasureRear(&rear);
+        }
+
+        PublishSnapshot(front_ok, front, rear_ok, rear);
+        vTaskDelay(pdMS_TO_TICKS(TOF_GUARD_POLL_MS));
+    }
+    ESP_LOGW(TAG, "ToF sampler task stopped");
+    vTaskDelete(nullptr);
+}
+
+void TofController::RequestFastSample() {
+    fast_sample_requested_.store(true, std::memory_order_release);
+}
+
+bool TofController::SampleOnDemand(TofSnapshot* out) {
+    if (!ready_ || io_busy_) {
+        return false;
+    }
+    vl53l0x_data_t front = {};
+    const bool front_ok = MeasureFront(&front);
+    vl53l0x_data_t rear = {};
+    bool rear_ok = false;
+    if (has_rear_) {
+        rear_ok = MeasureRear(&rear);
+    }
+    PublishSnapshot(front_ok, front, rear_ok, rear);
+    if (!front_ok) {
+        return false;
+    }
+    if (out != nullptr) {
+        return GetLatestSnapshot(out);
+    }
+    return true;
+}
+
+bool TofController::StartSampler() {
+    if (sampler_task_ != nullptr) {
+        return true;
+    }
+    sampler_running_.store(true, std::memory_order_release);
+    constexpr uint32_t kStackWords = 4096;
+    constexpr UBaseType_t kPriority = 4;
+    if (xTaskCreate(SamplerTaskEntry, "tof_sampler", kStackWords, this, kPriority, &sampler_task_) !=
+        pdPASS) {
+        sampler_running_.store(false, std::memory_order_release);
+        sampler_task_ = nullptr;
+        ESP_LOGE(TAG, "Failed to start ToF sampler task");
+        return false;
+    }
+    ESP_LOGI(TAG, "ToF sampler running (on-move @ %dms, idle=sleep)", TOF_GUARD_POLL_MS);
     return true;
 }
 

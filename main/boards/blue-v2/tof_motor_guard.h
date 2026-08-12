@@ -7,7 +7,7 @@ class TofMotorGuard {
 public:
     explicit TofMotorGuard(MotorController* motor);
 
-    // Requires TofController::Init() first. Starts background obstacle polling.
+    // Requires TofController::Init() + sampler first. Reads latest snapshot only (no I2C).
     bool Start();
 
 private:

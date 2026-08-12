@@ -1,18 +1,34 @@
 #ifndef BLUE_V2_TOF_CONTROLLER_H_
 #define BLUE_V2_TOF_CONTROLLER_H_
 
+#include <atomic>
+#include <cstdint>
 #include <mutex>
 #include <string>
+
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 extern "C" {
 #include <vl53l0x.h>
 }
 
+/** Latest front/rear samples from the dedicated ToF sampler task (mailbox, not FIFO). */
+struct TofSnapshot {
+    vl53l0x_data_t front{};
+    vl53l0x_data_t rear{};
+    bool front_ok = false;
+    bool rear_ok = false;
+    bool has_rear = false;
+    int64_t timestamp_ms = 0;
+    uint32_t sequence = 0;
+};
+
 class TofController {
 public:
     static TofController& Instance();
 
-    // Init I2C + VL53L0X, load saved calibration, register MCP tools.
+    // Init I2C + VL53L0X, load saved calibration, register MCP tools, start sampler.
     bool Init();
 
     bool IsReady() const {
@@ -32,7 +48,7 @@ public:
         return has_rear_;
     }
 
-    // Thread-safe measure — front sensor (default).
+    // Direct I2C measure — calibration/recovery only; prefer GetLatestSnapshot().
     bool Measure(vl53l0x_data_t* out);
 
     bool IsIoBusy() const {
@@ -44,6 +60,15 @@ public:
     }
 
     bool MeasureRear(vl53l0x_data_t* out);
+
+    /** Thread-safe copy of the newest sampler reading. Returns false if never sampled. */
+    bool GetLatestSnapshot(TofSnapshot* out) const;
+
+    /** Ask sampler to measure again soon (motor start). */
+    void RequestFastSample();
+
+    /** One-shot I2C measure (MCP debug while idle). Updates latest snapshot. */
+    bool SampleOnDemand(TofSnapshot* out = nullptr);
 
     // Run offset calibration at known target distance (mm). Saves result to NVS.
     std::string Calibrate(int distance_mm);
@@ -65,6 +90,19 @@ private:
     bool RecreateFrontSensor();
     bool HardRecoverSensor();
     bool RecoverBus(const char* reason);
+    bool StartSampler();
+    static void SamplerTaskEntry(void* arg);
+    void SamplerLoop();
+    void PublishSnapshot(bool front_ok, const vl53l0x_data_t& front, bool rear_ok,
+                         const vl53l0x_data_t& rear);
+
+    mutable std::mutex snapshot_mutex_;
+    TofSnapshot latest_snapshot_;
+    bool snapshot_valid_ = false;
+    std::atomic<uint32_t> snapshot_sequence_{0};
+    TaskHandle_t sampler_task_ = nullptr;
+    std::atomic<bool> sampler_running_{false};
+    std::atomic<bool> fast_sample_requested_{false};
 
     std::mutex mutex_;
     void* i2c_bus_ = nullptr;
