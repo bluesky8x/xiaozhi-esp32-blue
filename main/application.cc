@@ -698,9 +698,6 @@ void Application::InitializeProtocol() {
                         SetDeviceState(kDeviceStateIdle);
                     } else {
                         SetDeviceState(kDeviceStateListening);
-                        // Startup greeting / TTS stop can race with playback drain;
-                        // retry listen start if voice processing did not come back.
-                        ScheduleListeningResyncAfterRobotAction();
                     }
                 }
             } else if (strcmp(state->valuestring, "sentence_start") == 0) {
@@ -1143,21 +1140,24 @@ void Application::StartListeningAudio() {
         return;
     }
 
+    const bool voice_active = audio_service_.IsAudioProcessorRunning();
     static constexpr int64_t kListenStartDebounceUs = 2 * 1000000;
     const int64_t now_us = esp_timer_get_time();
-    if (audio_service_.IsAudioProcessorRunning() &&
-        last_listen_start_us_ != 0 &&
+
+    if (!voice_active) {
+        audio_service_.EnableVoiceProcessing(true);
+        ConfigureWakeWordForListening();
+        ESP_LOGI(TAG, "Voice processing enabled for listening");
+    }
+
+    if (voice_active && last_listen_start_us_ != 0 &&
         (now_us - last_listen_start_us_) < kListenStartDebounceUs) {
-        ESP_LOGD(TAG, "StartListeningAudio debounced");
+        ESP_LOGD(TAG, "SendStartListening debounced");
         return;
     }
+
     last_listen_start_us_ = now_us;
-
-    // Send the start listening command
     protocol_->SendStartListening(listening_mode_);
-    audio_service_.EnableVoiceProcessing(true);
-
-    ConfigureWakeWordForListening();
 
     // Play popup sound after ResetDecoder (in EnableVoiceProcessing) has been called
     if (play_popup_on_listening_) {
