@@ -103,7 +103,7 @@
 
 // INMP441 (L/R→GND): AGC + soft compressor in no_audio_codec (see AUDIO_MIC_AGC_* in CMakeLists).
 #define AUDIO_MIC_SHIFT_BITS      12
-#define AUDIO_MIC_INPUT_GAIN      1.0f
+#define AUDIO_MIC_INPUT_GAIN      2.0f
 #define AUDIO_MIC_SOFT_LIMIT      24000
 
 // Mic level debug on serial (~1 Hz): peak/RMS while I2S input active (Blue V2 bring-up).

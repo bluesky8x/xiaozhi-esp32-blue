@@ -273,12 +273,9 @@ void Application::Run() {
         if (bits & MAIN_EVENT_SEND_AUDIO) {
             while (auto packet = audio_service_.PopPacketFromSendQueue()) {
                 if (protocol_ && !protocol_->SendAudio(std::move(packet))) {
-                    // Drop the remaining packets. Leaving them in the queue would
-                    // stall the Opus codec task (it waits for queue space), which in
-                    // turn deadlocks the whole audio input pipeline, as no new
-                    // MAIN_EVENT_SEND_AUDIO event would ever be triggered again.
                     while (audio_service_.PopPacketFromSendQueue())
                         ;
+                    Schedule([this]() { HandleAudioUplinkSendFailure(); });
                     break;
                 }
             }
@@ -1184,6 +1181,31 @@ void Application::StartListeningAudio() {
     }
 }
 
+void Application::HandleAudioUplinkSendFailure() {
+    const auto state = GetDeviceState();
+    if (state != kDeviceStateListening && state != kDeviceStateSpeaking) {
+        return;
+    }
+    if (!protocol_) {
+        return;
+    }
+
+    const int64_t now_us = esp_timer_get_time();
+    static constexpr int64_t kReconnectCooldownUs = 5 * 1000 * 1000;
+    if (last_uplink_reconnect_us_ != 0 &&
+        (now_us - last_uplink_reconnect_us_) < kReconnectCooldownUs) {
+        ESP_LOGW(TAG, "Audio uplink failed — reconnect debounced");
+        return;
+    }
+    last_uplink_reconnect_us_ = now_us;
+
+    const ListeningMode mode = listening_mode_;
+    ESP_LOGW(TAG, "Audio uplink send failed — reconnecting WebSocket");
+    protocol_->CloseAudioChannel();
+    SetDeviceState(kDeviceStateConnecting);
+    Schedule([this, mode]() { ContinueOpenAudioChannel(mode); });
+}
+
 void Application::ResyncListeningAfterMotorStop() {
     if (GetDeviceState() != kDeviceStateListening) {
         ESP_LOGW(TAG, "Motor listen re-sync skipped: state=%s",
@@ -1214,7 +1236,9 @@ void Application::EnsureListeningAfterRobotAction() {
     }
     if (audio_service_.IsAudioProcessorRunning()) {
         pending_listening_start_ = false;
-        ESP_LOGD(TAG, "Listen re-sync skipped: voice processing active");
+        last_listen_start_us_ = 0;
+        protocol_->SendStartListening(listening_mode_);
+        ESP_LOGI(TAG, "Listen start re-sent (voice already active)");
         return;
     }
     pending_listening_start_ = false;
