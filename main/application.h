@@ -154,6 +154,7 @@ private:
     bool aborted_ = false;
     bool assets_version_checked_ = false;
     bool play_popup_on_listening_ = false;  // Flag to play popup sound after state changes to listening
+    bool skip_popup_on_next_listen_ = false;  // First listen after connect (server startup greeting)
     bool pending_listening_start_ = false;  // Waiting for playback to drain before starting listening (auto mode)
     int64_t last_listen_start_us_ = 0;  // Debounce duplicate SendStartListening (robot resync)
     int64_t last_uplink_reconnect_us_ = 0;  // Cooldown after WebSocket send failure

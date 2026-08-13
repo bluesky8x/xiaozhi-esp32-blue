@@ -241,9 +241,15 @@ void Application::Run() {
         auto bits = xEventGroupWaitBits(event_group_, ALL_EVENTS, pdTRUE, pdFALSE, portMAX_DELAY);
 
         if (bits & MAIN_EVENT_ERROR) {
-            SetDeviceState(kDeviceStateIdle);
-            Alert(Lang::Strings::ERROR, last_error_message_.c_str(), "cancel",
-                  Lang::Sounds::OGG_EXCLAMATION);
+            // Avoid exclamation + idle during server TTS (often misread as "restart").
+            if (GetDeviceState() == kDeviceStateSpeaking) {
+                ESP_LOGW(TAG, "Network error during speaking (alert deferred): %s",
+                         last_error_message_.c_str());
+            } else {
+                SetDeviceState(kDeviceStateIdle);
+                Alert(Lang::Strings::ERROR, last_error_message_.c_str(), "cancel",
+                      Lang::Sounds::OGG_EXCLAMATION);
+            }
         }
 
         if (bits & MAIN_EVENT_NETWORK_CONNECTED) {
@@ -689,6 +695,7 @@ void Application::InitializeProtocol() {
 
     protocol_->OnAudioChannelOpened([this, &board]() {
         board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+        skip_popup_on_next_listen_ = true;
         auto* codec = board.GetAudioCodec();
         if (protocol_->server_sample_rate() != codec->output_sample_rate()) {
             ESP_LOGW(TAG,
@@ -721,8 +728,15 @@ void Application::InitializeProtocol() {
             }
             if (strcmp(state->valuestring, "start") == 0) {
                 aborted_ = false;
-                audio_service_.ResetDecoder();
-                SetDeviceState(kDeviceStateSpeaking);
+                const auto prev = GetDeviceState();
+                if (prev != kDeviceStateSpeaking) {
+                    SetDeviceState(kDeviceStateSpeaking);
+                    // Opus frames may arrive before this JSON on the WebSocket; only flush
+                    // when coming from idle/connecting (not mid-listening greeting).
+                    if (prev == kDeviceStateIdle || prev == kDeviceStateConnecting) {
+                        audio_service_.ResetDecoder();
+                    }
+                }
             } else if (strcmp(state->valuestring, "stop") == 0) {
                 if (GetDeviceState() == kDeviceStateSpeaking) {
                     if (listening_mode_ == kListeningModeManualStop) {
@@ -1193,7 +1207,12 @@ void Application::StartListeningAudio() {
     // Play popup sound after ResetDecoder (in EnableVoiceProcessing) has been called
     if (play_popup_on_listening_) {
         play_popup_on_listening_ = false;
-        audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);
+        if (skip_popup_on_next_listen_) {
+            skip_popup_on_next_listen_ = false;
+            ESP_LOGI(TAG, "Skip popup — server startup greeting expected");
+        } else {
+            audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);
+        }
     }
 }
 
