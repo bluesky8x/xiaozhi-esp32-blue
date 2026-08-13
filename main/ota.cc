@@ -159,6 +159,7 @@ esp_err_t Ota::CheckVersion() {
     auto status_code = http->GetStatusCode();
     if (status_code != 200) {
         ESP_LOGE(TAG, "Failed to check version, status code: %d", status_code);
+        http->Close();
         return status_code;
     }
 
