@@ -6,6 +6,11 @@
 #include <sdkconfig.h>
 #if CONFIG_BOARD_TYPE_BLUE_V2
 #include "boards/blue-v2/config.h"
+#elif CONFIG_BOARD_TYPE_BLUE_V3
+#include "boards/blue-v3/config.h"
+#endif
+#if CONFIG_BOARD_TYPE_BLUE_V2 || CONFIG_BOARD_TYPE_BLUE_V3
+#include "boards/blue-v2/blue_cloud_guard.h"
 #endif
 
 #include <freertos/FreeRTOS.h>
@@ -85,7 +90,7 @@ Ota::~Ota() {
 std::string Ota::GetCheckVersionUrl() {
     Settings settings("wifi", false);
     std::string url = settings.GetString("ota_url");
-#if CONFIG_BOARD_TYPE_BLUE_V2 && BLUE_V2_BLOCK_CLOUD_SERVERS
+#if (CONFIG_BOARD_TYPE_BLUE_V2 || CONFIG_BOARD_TYPE_BLUE_V3) && BLUE_BLOCK_CLOUD_SERVERS
     if (url.empty()) {
         ESP_LOGE(TAG, "OTA URL not set — configure in WiFi portal (Advanced)");
         return "";
@@ -195,7 +200,7 @@ esp_err_t Ota::CheckVersion() {
     }
 
     has_mqtt_config_ = false;
-#if CONFIG_BOARD_TYPE_BLUE_V2 && BLUE_V2_BLOCK_CLOUD_SERVERS
+#if (CONFIG_BOARD_TYPE_BLUE_V2 || CONFIG_BOARD_TYPE_BLUE_V3) && BLUE_BLOCK_CLOUD_SERVERS
     // Blue V2: websocket from your OTA server only — never MQTT to xiaozhi cloud.
 #else
     cJSON* mqtt = cJSON_GetObjectItem(root, "mqtt");

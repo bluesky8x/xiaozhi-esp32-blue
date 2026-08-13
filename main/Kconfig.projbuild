@@ -172,6 +172,9 @@ choice BOARD_TYPE
     config BOARD_TYPE_BLUE_V2
         bool "Blue V2 (ST7789 1.54\" robot, pin-optimized)"
         depends on IDF_TARGET_ESP32S3
+    config BOARD_TYPE_BLUE_V3
+        bool "Blue V3 (MCU + audio only, chat stability test)"
+        depends on IDF_TARGET_ESP32S3
     config BOARD_TYPE_BREAD_COMPACT_WIFI_LCD
         bool "Bread Compact Wi-Fi + LCD (面包板)"
         depends on IDF_TARGET_ESP32S3
@@ -702,7 +705,7 @@ choice DISPLAY_OLED_TYPE
 endchoice
 
 choice DISPLAY_LCD_TYPE
-    depends on BOARD_TYPE_BREAD_COMPACT_WIFI_LCD || BOARD_TYPE_BREAD_COMPACT_ESP32_LCD || BOARD_TYPE_WDMOMO_CGC || BOARD_TYPE_BREAD_COMPACT_WIFI_CAM || BOARD_TYPE_BLUE_V2
+    depends on BOARD_TYPE_BREAD_COMPACT_WIFI_LCD || BOARD_TYPE_BREAD_COMPACT_ESP32_LCD || BOARD_TYPE_WDMOMO_CGC || BOARD_TYPE_BREAD_COMPACT_WIFI_CAM || BOARD_TYPE_BLUE_V2 || BOARD_TYPE_BLUE_V3
     prompt "LCD Type"
     default LCD_ST7789_240X320
     help

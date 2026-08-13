@@ -17,6 +17,25 @@
 #include "boards/blue-v2/blue_v2_otto_display.h"
 #include "boards/blue-v2/blue_cloud_guard.h"
 #endif
+#elif CONFIG_BOARD_TYPE_BLUE_V3
+#include "boards/blue-v3/config.h"
+#include "boards/blue-v2/blue_v2_otto_display.h"
+#include "boards/blue-v2/blue_cloud_guard.h"
+#endif
+
+#if CONFIG_BOARD_TYPE_BLUE_V3 || (CONFIG_BOARD_TYPE_BLUE_V2 && BLUE_V2_OTTO_LCD_ONLY)
+#define BLUE_APP_OTTO_CHAT 1
+#endif
+#if CONFIG_BOARD_TYPE_BLUE_V3 || \
+    (CONFIG_BOARD_TYPE_BLUE_V2 && BLUE_V2_OTTO_LCD_ONLY && BLUE_V2_OTTO_AUDIO_ENABLE) || \
+    (CONFIG_BOARD_TYPE_BLUE_V2 && BLUE_V2_USE_V3_DISPLAY && !BLUE_V2_LCD_TEST_SCREEN && \
+     !BLUE_V2_OTTO_LCD_ONLY)
+#define BLUE_APP_DEFER_I2S 1
+#endif
+#if CONFIG_BOARD_TYPE_BLUE_V3
+#define BLUE_APP_DEFAULT_EMOTION BLUE_V3_DEFAULT_EMOTION
+#elif CONFIG_BOARD_TYPE_BLUE_V2 && BLUE_V2_OTTO_LCD_ONLY
+#define BLUE_APP_DEFAULT_EMOTION BLUE_V2_DEFAULT_EMOTION
 #endif
 #include "assets.h"
 #include "assets/lang_config.h"
@@ -71,16 +90,16 @@ void Application::Initialize() {
     // Setup the display
     auto display = board.GetDisplay();
     display->SetupUI();
-#if CONFIG_BOARD_TYPE_BLUE_V2 && BLUE_V2_OTTO_LCD_ONLY
+#if BLUE_APP_OTTO_CHAT
     {
         auto& assets = Assets::GetInstance();
         if (assets.partition_valid()) {
             assets.Apply(false);
         } else {
-            ESP_LOGW(TAG, "Blue V2 Otto bench: assets partition unavailable");
+            ESP_LOGW(TAG, "Blue Otto chat: assets partition unavailable");
         }
     }
-    display->SetEmotion(BLUE_V2_DEFAULT_EMOTION);
+    display->SetEmotion(BLUE_APP_DEFAULT_EMOTION);
 #elif CONFIG_BOARD_TYPE_BLUE_V2 && !BLUE_V2_LCD_TEST_SCREEN && !BLUE_V2_USE_V3_DISPLAY
     {
         auto& assets = Assets::GetInstance();
@@ -92,7 +111,7 @@ void Application::Initialize() {
     }
     display->SetEmotion("neutral");
 #endif
-#if CONFIG_BOARD_TYPE_BLUE_V2
+#if CONFIG_BOARD_TYPE_BLUE_V2 || CONFIG_BOARD_TYPE_BLUE_V3
     if (auto* lcd = dynamic_cast<LcdDisplay*>(display)) {
         lcd->RefreshNow();
     }
@@ -100,9 +119,7 @@ void Application::Initialize() {
         backlight->RestoreBrightness();
     }
 #endif
-#if CONFIG_BOARD_TYPE_BLUE_V2 && \
-    ((BLUE_V2_USE_V3_DISPLAY && !BLUE_V2_LCD_TEST_SCREEN && !BLUE_V2_OTTO_LCD_ONLY) || \
-     (BLUE_V2_OTTO_LCD_ONLY && BLUE_V2_OTTO_AUDIO_ENABLE))
+#if BLUE_APP_DEFER_I2S
     // I2S DMA during early boot corrupt ST7789 SPI flush on this wiring (motor uses GPIO only).
     defer_blue_v2_heavy_init_ = true;
 #else
@@ -386,19 +403,19 @@ void Application::HandleActivationDoneEvent() {
 
 #if (CONFIG_BOARD_TYPE_BLUE_V2 && BLUE_V2_USE_V3_DISPLAY && !BLUE_V2_LCD_TEST_SCREEN && \
      !BLUE_V2_OTTO_LCD_ONLY) || \
-    (CONFIG_BOARD_TYPE_BLUE_V2 && BLUE_V2_OTTO_LCD_ONLY && BLUE_V2_OTTO_AUDIO_ENABLE)
+    BLUE_APP_DEFER_I2S
     if (defer_blue_v2_heavy_init_) {
         auto codec = board.GetAudioCodec();
         audio_service_.Initialize(codec);
         audio_service_.Start();
-#if CONFIG_BOARD_TYPE_BLUE_V2 && BLUE_V2_OTTO_LCD_ONLY && BLUE_V2_OTTO_AUDIO_ENABLE
+#if BLUE_APP_OTTO_CHAT
         if (auto* otto = dynamic_cast<BlueV2OttoDisplay*>(display)) {
             otto->RestoreFace();
         }
 #endif
         board.OnApplicationDisplayReady();
         defer_blue_v2_heavy_init_ = false;
-#if CONFIG_BOARD_TYPE_BLUE_V2 && BLUE_V2_OTTO_LCD_ONLY && BLUE_V2_OTTO_AUDIO_ENABLE
+#if BLUE_APP_OTTO_CHAT
         if (auto* otto = dynamic_cast<BlueV2OttoDisplay*>(display)) {
             otto->RestoreFace();
         }
@@ -406,9 +423,9 @@ void Application::HandleActivationDoneEvent() {
         if (auto* lcd = dynamic_cast<LcdDisplay*>(display)) {
             lcd->RefreshNow();
         }
-#if CONFIG_BOARD_TYPE_BLUE_V2 && BLUE_V2_OTTO_LCD_ONLY
-        ESP_LOGI(TAG, "Otto bench: activation init done (motor/ToF, no wake word)");
-#else
+#if BLUE_APP_OTTO_CHAT
+        ESP_LOGI(TAG, "Blue chat profile: activation init done (LCD + I2S, no motor)");
+#elif CONFIG_BOARD_TYPE_BLUE_V2
         ESP_LOGI(TAG, "Blue robot: motor + audio started after activation (display restored)");
 #endif
     }
@@ -419,12 +436,12 @@ void Application::HandleActivationDoneEvent() {
     std::string message = std::string(Lang::Strings::VERSION) + ota_->GetCurrentVersion();
     display->ShowNotification(message.c_str());
     display->SetChatMessage("system", "");
-#if CONFIG_BOARD_TYPE_BLUE_V2
-#if BLUE_V2_OTTO_LCD_ONLY
+#if CONFIG_BOARD_TYPE_BLUE_V2 || CONFIG_BOARD_TYPE_BLUE_V3
+#if BLUE_APP_OTTO_CHAT
     if (auto* otto = dynamic_cast<BlueV2OttoDisplay*>(display)) {
         otto->RestoreFace();
     }
-#elif !BLUE_V2_LCD_TEST_SCREEN
+#elif CONFIG_BOARD_TYPE_BLUE_V2 && !BLUE_V2_LCD_TEST_SCREEN
     display->SetEmotion("neutral");
     if (auto* lcd = dynamic_cast<LcdDisplay*>(display)) {
         lcd->RefreshNow();
@@ -485,7 +502,7 @@ void Application::CheckAssetsVersion() {
     std::string download_url = settings.GetString("download_url");
 
     if (!download_url.empty()) {
-#if CONFIG_BOARD_TYPE_BLUE_V2 && BLUE_V2_BLOCK_CLOUD_SERVERS
+#if (CONFIG_BOARD_TYPE_BLUE_V2 || CONFIG_BOARD_TYPE_BLUE_V3) && BLUE_BLOCK_CLOUD_SERVERS
         if (BlueIsCloudServerUrl(download_url.c_str())) {
             ESP_LOGW(TAG, "Blocked cloud assets URL from OTA");
             settings.EraseKey("download_url");
@@ -531,15 +548,15 @@ void Application::CheckAssetsVersion() {
     // Apply assets
     assets.Apply();
     display->SetChatMessage("system", "");
-#if CONFIG_BOARD_TYPE_BLUE_V2
-#if BLUE_V2_OTTO_LCD_ONLY
-    display->SetEmotion(BLUE_V2_DEFAULT_EMOTION);
+#if CONFIG_BOARD_TYPE_BLUE_V2 || CONFIG_BOARD_TYPE_BLUE_V3
+#if BLUE_APP_OTTO_CHAT
+    display->SetEmotion(BLUE_APP_DEFAULT_EMOTION);
     if (auto* otto = dynamic_cast<BlueV2OttoDisplay*>(display)) {
         otto->RestoreFace();
     } else if (auto* lcd = dynamic_cast<LcdDisplay*>(display)) {
         lcd->RefreshNow();
     }
-#elif !BLUE_V2_LCD_TEST_SCREEN && !BLUE_V2_USE_V3_DISPLAY
+#elif CONFIG_BOARD_TYPE_BLUE_V2 && !BLUE_V2_LCD_TEST_SCREEN && !BLUE_V2_USE_V3_DISPLAY
     display->SetEmotion("neutral");
     if (auto* lcd = dynamic_cast<LcdDisplay*>(display)) {
         lcd->RefreshNow();
@@ -634,7 +651,7 @@ void Application::InitializeProtocol() {
 
     display->SetStatus(Lang::Strings::LOADING_PROTOCOL);
 
-#if CONFIG_BOARD_TYPE_BLUE_V2 && BLUE_V2_BLOCK_CLOUD_SERVERS
+#if (CONFIG_BOARD_TYPE_BLUE_V2 || CONFIG_BOARD_TYPE_BLUE_V3) && BLUE_BLOCK_CLOUD_SERVERS
     Settings ws_settings("websocket", false);
     const std::string ws_url = ws_settings.GetString("url");
     if (ota_->HasWebsocketConfig() || (!ws_url.empty() && !BlueIsCloudServerUrl(ws_url.c_str()))) {
@@ -835,10 +852,9 @@ void Application::Alert(const char* status, const char* message, const char* emo
     auto display = Board::GetInstance().GetDisplay();
     display->SetStatus(status);
     const char* display_emotion = emotion;
-#if CONFIG_BOARD_TYPE_BLUE_V2 && BLUE_V2_OTTO_LCD_ONLY
-    // Otto GIF assets omit cloud_off/link — avoid blank face during OTA/network alerts.
+#if BLUE_APP_OTTO_CHAT
     if (emotion == nullptr || strcmp(emotion, "cloud_off") == 0 || strcmp(emotion, "link") == 0) {
-        display_emotion = BLUE_V2_DEFAULT_EMOTION;
+        display_emotion = BLUE_APP_DEFAULT_EMOTION;
     }
 #endif
     display->SetEmotion(display_emotion);
@@ -1080,13 +1096,13 @@ void Application::HandleStateChangedEvent() {
         case kDeviceStateIdle:
             display->SetStatus(Lang::Strings::STANDBY);
             display->ClearChatMessages();    // Clear messages first
-#if CONFIG_BOARD_TYPE_BLUE_V2 && BLUE_V2_OTTO_LCD_ONLY
-            display->SetEmotion(BLUE_V2_DEFAULT_EMOTION);
+#if BLUE_APP_OTTO_CHAT
+            display->SetEmotion(BLUE_APP_DEFAULT_EMOTION);
 #else
             display->SetEmotion("neutral");  // Then set emotion (wechat mode checks child count)
 #endif
             audio_service_.EnableVoiceProcessing(false);
-#if CONFIG_BOARD_TYPE_BLUE_V2 && BLUE_V2_OTTO_LCD_ONLY
+#if BLUE_APP_OTTO_CHAT
             if (auto* otto = dynamic_cast<BlueV2OttoDisplay*>(display)) {
                 otto->RestoreFace();
             }
@@ -1312,7 +1328,7 @@ namespace {
 
 void RestoreDisplayAfterMotorGlitch() {
     auto* display = Board::GetInstance().GetDisplay();
-#if CONFIG_BOARD_TYPE_BLUE_V2 && BLUE_V2_OTTO_LCD_ONLY
+#if BLUE_APP_OTTO_CHAT
     if (auto* otto = dynamic_cast<BlueV2OttoDisplay*>(display)) {
         otto->HardRestoreFace();
         return;

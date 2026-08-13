@@ -1,0 +1,13 @@
+{
+    "type": "blue-v3",
+    "target": "esp32s3",
+    "builds": [
+        {
+            "name": "blue-v3",
+            "sdkconfig_append": [
+                "CONFIG_LCD_ST7789_240X240=y",
+                "CONFIG_LANGUAGE_VI_VN=y"
+            ]
+        }
+    ]
+}

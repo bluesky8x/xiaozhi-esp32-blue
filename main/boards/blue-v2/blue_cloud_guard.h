@@ -15,7 +15,17 @@ inline bool BlueIsCloudServerUrl(const char* url) {
     return strstr(url, "tenclass.net") != nullptr || strstr(url, "xiaozhi.me") != nullptr;
 }
 
-#if BLUE_V2_BLOCK_CLOUD_SERVERS
+#ifndef BLUE_BLOCK_CLOUD_SERVERS
+#if defined(BLUE_V3_BLOCK_CLOUD_SERVERS) && BLUE_V3_BLOCK_CLOUD_SERVERS
+#define BLUE_BLOCK_CLOUD_SERVERS 1
+#elif defined(BLUE_V2_BLOCK_CLOUD_SERVERS) && BLUE_V2_BLOCK_CLOUD_SERVERS
+#define BLUE_BLOCK_CLOUD_SERVERS 1
+#else
+#define BLUE_BLOCK_CLOUD_SERVERS 0
+#endif
+#endif
+
+#if BLUE_BLOCK_CLOUD_SERVERS
 
 // Drop stale xiaozhi cloud endpoints left in NVS from older firmware or misconfiguration.
 inline void BlueSanitizeStoredServerSettings() {
@@ -41,6 +51,6 @@ inline void BlueSanitizeStoredServerSettings() {
     }
 }
 
-#endif  // BLUE_V2_BLOCK_CLOUD_SERVERS
+#endif  // BLUE_BLOCK_CLOUD_SERVERS
 
 #endif  // BLUE_CLOUD_GUARD_H_

@@ -1,0 +1,83 @@
+#ifndef _BOARD_CONFIG_H_
+#define _BOARD_CONFIG_H_
+
+#include <driver/gpio.h>
+
+// Blue V3 — chat-stability profile: same ST7789 + audio as V2, no motor / ToF / robot MCP.
+// Hardware pins match Blue V2 — see ../blue-v2/WIRING.md
+
+#define AUDIO_INPUT_SAMPLE_RATE  16000
+#define AUDIO_OUTPUT_SAMPLE_RATE 16000
+
+#define AUDIO_I2S_GPIO_WS   GPIO_NUM_4
+#define AUDIO_I2S_GPIO_BCLK GPIO_NUM_5
+#define AUDIO_I2S_GPIO_DIN  GPIO_NUM_6
+#define AUDIO_I2S_GPIO_DOUT GPIO_NUM_7
+
+#define BUILTIN_LED_GPIO        GPIO_NUM_48
+#define BOOT_BUTTON_GPIO        GPIO_NUM_0
+#define TOUCH_BUTTON_GPIO       GPIO_NUM_16
+#define TOUCH_BUTTON_ACTIVE_HIGH 1
+#define TOUCH_DEBOUNCE_MS       350
+
+#define RESET_NVS_BUTTON_GPIO       GPIO_NUM_NC
+#define RESET_FACTORY_BUTTON_GPIO   GPIO_NUM_NC
+#define FACTORY_RESET_LONG_PRESS_MS 5000
+
+#define POWER_SAVE_SLEEP_SECS (-1)
+#define POWER_SAVE_DIM_BRIGHTNESS 25
+
+#define DISPLAY_LVGL_BUFFER_LINES 80
+
+#define BLUE_V3_DEFAULT_EMOTION "neutral"
+#define BLUE_V3_DEFER_I2S 1
+
+#define BLUE_V3_BLOCK_CLOUD_SERVERS 1
+
+#define DISPLAY_MOSI_PIN      GPIO_NUM_10
+#define DISPLAY_CLK_PIN       GPIO_NUM_9
+#define DISPLAY_DC_PIN        GPIO_NUM_8
+#define DISPLAY_RST_PIN       GPIO_NUM_18
+#define DISPLAY_BACKLIGHT_PIN GPIO_NUM_17
+#define DISPLAY_CS_PIN        GPIO_NUM_NC
+
+#define AUDIO_MIC_SHIFT_BITS      12
+#define AUDIO_MIC_INPUT_GAIN      1.0f
+#define AUDIO_MIC_SOFT_LIMIT      24000
+#define AUDIO_MIC_DEBUG_LOG         1
+
+#ifdef CONFIG_LCD_ST7789_240X240
+#define LCD_TYPE_ST7789_SERIAL
+#define DISPLAY_WIDTH   240
+#define DISPLAY_HEIGHT  240
+#define DISPLAY_MIRROR_X false
+#define DISPLAY_MIRROR_Y false
+#define DISPLAY_SWAP_XY false
+#define DISPLAY_INVERT_COLOR    true
+#define DISPLAY_RGB_ORDER  LCD_RGB_ELEMENT_ORDER_RGB
+#define DISPLAY_OFFSET_X  0
+#define DISPLAY_OFFSET_Y  0
+#define DISPLAY_BACKLIGHT_OUTPUT_INVERT false
+#define DISPLAY_SPI_MODE 3
+#endif
+
+#ifdef CONFIG_LCD_ST7789_240X135
+#define LCD_TYPE_ST7789_SERIAL
+#define DISPLAY_WIDTH   240
+#define DISPLAY_HEIGHT  135
+#define DISPLAY_MIRROR_X true
+#define DISPLAY_MIRROR_Y false
+#define DISPLAY_SWAP_XY true
+#define DISPLAY_INVERT_COLOR    true
+#define DISPLAY_RGB_ORDER  LCD_RGB_ELEMENT_ORDER_RGB
+#define DISPLAY_OFFSET_X  40
+#define DISPLAY_OFFSET_Y  53
+#define DISPLAY_BACKLIGHT_OUTPUT_INVERT false
+#define DISPLAY_SPI_MODE 0
+#endif
+
+#ifndef DISPLAY_WIDTH
+#error "Select LCD type in menuconfig: ST7789 240*240 or ST7789 240*135"
+#endif
+
+#endif  // _BOARD_CONFIG_H_

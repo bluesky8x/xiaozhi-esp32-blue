@@ -42,6 +42,14 @@
 #define AUDIO_MIC_AGC_RELEASE 0.05f
 #endif
 
+#ifndef AUDIO_MIC_NOISE_GATE_PRE
+#define AUDIO_MIC_NOISE_GATE_PRE 0
+#endif
+
+#ifndef AUDIO_MIC_AGC_MIN_PRE
+#define AUDIO_MIC_AGC_MIN_PRE AUDIO_MIC_NOISE_GATE_PRE
+#endif
+
 #ifndef AUDIO_MIC_COMPRESS_KNEE
 #define AUDIO_MIC_COMPRESS_KNEE 10000
 #endif
@@ -125,20 +133,28 @@ void ProcessMicSamples(const int32_t* raw_i2s, int16_t* dest, int samples, float
     float effective_gain = base_gain;
 #if AUDIO_MIC_AGC_ENABLE
     {
-        const float ref_peak = static_cast<float>(pre_peak > 32 ? pre_peak : 32);
-        float block_gain = static_cast<float>(AUDIO_MIC_AGC_TARGET_PEAK) / ref_peak;
-        if (block_gain > AUDIO_MIC_AGC_MAX_GAIN) {
-            block_gain = AUDIO_MIC_AGC_MAX_GAIN;
-        }
-        if (block_gain < AUDIO_MIC_AGC_MIN_GAIN) {
-            block_gain = AUDIO_MIC_AGC_MIN_GAIN;
-        }
-        if (block_gain < s_agc_gain) {
-            s_agc_gain = s_agc_gain * (1.0f - AUDIO_MIC_AGC_ATTACK) + block_gain * AUDIO_MIC_AGC_ATTACK;
+        const bool agc_allowed = (AUDIO_MIC_AGC_MIN_PRE <= 0) ||
+                                 (pre_peak >= AUDIO_MIC_AGC_MIN_PRE);
+        if (agc_allowed) {
+            const float ref_peak = static_cast<float>(pre_peak > 32 ? pre_peak : 32);
+            float block_gain = static_cast<float>(AUDIO_MIC_AGC_TARGET_PEAK) / ref_peak;
+            if (block_gain > AUDIO_MIC_AGC_MAX_GAIN) {
+                block_gain = AUDIO_MIC_AGC_MAX_GAIN;
+            }
+            if (block_gain < AUDIO_MIC_AGC_MIN_GAIN) {
+                block_gain = AUDIO_MIC_AGC_MIN_GAIN;
+            }
+            if (block_gain < s_agc_gain) {
+                s_agc_gain = s_agc_gain * (1.0f - AUDIO_MIC_AGC_ATTACK) + block_gain * AUDIO_MIC_AGC_ATTACK;
+            } else {
+                s_agc_gain = s_agc_gain * (1.0f - AUDIO_MIC_AGC_RELEASE) + block_gain * AUDIO_MIC_AGC_RELEASE;
+            }
+            effective_gain = base_gain * s_agc_gain;
         } else {
-            s_agc_gain = s_agc_gain * (1.0f - AUDIO_MIC_AGC_RELEASE) + block_gain * AUDIO_MIC_AGC_RELEASE;
+            // Quiet block: pass natural level only — do not AGC-boost idle noise to fake "OK".
+            s_agc_gain = s_agc_gain * 0.85f + 0.15f;
+            effective_gain = base_gain;
         }
-        effective_gain = base_gain * s_agc_gain;
     }
 
     for (int i = 0; i < samples; i++) {

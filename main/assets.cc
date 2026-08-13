@@ -22,6 +22,16 @@
 #include <sdkconfig.h>
 #if CONFIG_BOARD_TYPE_BLUE_V2
 #include "boards/blue-v2/config.h"
+#elif CONFIG_BOARD_TYPE_BLUE_V3
+#include "boards/blue-v3/config.h"
+#endif
+#if CONFIG_BOARD_TYPE_BLUE_V3 || (CONFIG_BOARD_TYPE_BLUE_V2 && defined(BLUE_V2_OTTO_LCD_ONLY) && BLUE_V2_OTTO_LCD_ONLY)
+#define BLUE_ASSETS_OTTO_CHAT 1
+#endif
+#if CONFIG_BOARD_TYPE_BLUE_V3
+#define BLUE_ASSETS_DEFAULT_EMOTION BLUE_V3_DEFAULT_EMOTION
+#elif CONFIG_BOARD_TYPE_BLUE_V2 && defined(BLUE_V2_OTTO_LCD_ONLY) && BLUE_V2_OTTO_LCD_ONLY
+#define BLUE_ASSETS_DEFAULT_EMOTION BLUE_V2_DEFAULT_EMOTION
 #endif
 
 #define TAG "Assets"
@@ -400,11 +410,11 @@ bool Assets::LvglStrategy::Apply(Assets* assets, bool refresh_display_theme) {
 #else
         ESP_LOGI(TAG, "Refreshing display theme...");
 
-#if CONFIG_BOARD_TYPE_BLUE_V2 && BLUE_V2_OTTO_LCD_ONLY
+#if BLUE_ASSETS_OTTO_CHAT
         if (auto* light = LvglThemeManager::GetInstance().GetTheme("light")) {
             display->SetTheme(light);
         }
-        display->SetEmotion(BLUE_V2_DEFAULT_EMOTION);
+        display->SetEmotion(BLUE_ASSETS_DEFAULT_EMOTION);
 #elif CONFIG_BOARD_TYPE_BLUE_V2
         if (dark_theme != nullptr) {
             dark_theme->set_background_image(nullptr);
