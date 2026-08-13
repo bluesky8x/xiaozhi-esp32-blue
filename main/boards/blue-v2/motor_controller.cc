@@ -1,8 +1,10 @@
 #include "motor_controller.h"
 
 #include "application.h"
+#include "config.h"
 #include "mcp_server.h"
 #include "tof_controller.h"
+#include "tof_safety_check.h"
 
 #include <algorithm>
 #include <esp_timer.h>
@@ -81,6 +83,14 @@ void MotorController::WorkerLoop() {
         if (cmd.type == CmdType::kStop) {
             ExecuteStop();
         } else {
+            // First move in queue (motors idle): fresh ToF check before GPIO drive.
+            if (!IsMoving()) {
+                TofSafetyStopReason reason = TofSafetyStopReason::None;
+                if (!TofPreMoveCheck(cmd.left, cmd.right, &reason)) {
+                    ESP_LOGW(MOTOR_TAG, "Move skipped — pre-move ToF (%s)", TofSafetyStopReasonName(reason));
+                    continue;
+                }
+            }
             ExecuteMove(cmd.left, cmd.right, cmd.duration_ms);
         }
     }
