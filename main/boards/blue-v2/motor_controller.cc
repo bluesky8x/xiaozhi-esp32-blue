@@ -8,10 +8,12 @@
 
 #if CONFIG_BOARD_TYPE_BLUE_V2
 #include "assets/lang_config.h"
+#include "motor_dance.h"
 #endif
 
 #include <algorithm>
 #include <esp_timer.h>
+#include <string_view>
 
 MotorController* MotorController::instance_ = nullptr;
 
@@ -71,7 +73,8 @@ MotorController::~MotorController() {
 }
 
 bool MotorController::ShouldPauseUplink() {
-    return instance_ != nullptr && instance_->IsMoving();
+    return instance_ != nullptr &&
+           (instance_->IsMoving() || instance_->IsDancing());
 }
 
 void MotorController::WorkerTaskEntry(void* arg) {
@@ -93,7 +96,7 @@ void MotorController::WorkerLoop() {
                          TofSafetyStopReasonName(reason));
                 continue;
             }
-            RunDanceRoutine();
+            RunDanceRoutine(cmd.dance_track);
         } else {
             // First move in queue (motors idle): fresh ToF check before GPIO drive.
             if (!IsMoving()) {
@@ -159,14 +162,29 @@ bool MotorController::EnqueueStop() {
     return PushCommand(cmd, true);
 }
 
-bool MotorController::EnqueueDance() {
+bool MotorController::EnqueueDance(int track) {
+    uint8_t normalized = 1;
+    if (track == 3) {
+        normalized = 3;
+    } else if (track == 2) {
+        normalized = 2;
+    }
     MotorCommand cmd = {
         .type = CmdType::kDance,
         .left = 0,
         .right = 0,
         .duration_ms = 0,
+        .dance_track = normalized,
     };
     return PushCommand(cmd, true);
+}
+
+void MotorController::RequestDanceStop() {
+    if (!dancing_.load(std::memory_order_acquire)) {
+        return;
+    }
+    dance_cancel_.store(true, std::memory_order_release);
+    EnqueueStop();
 }
 
 int* MotorController::LevelCacheFor(gpio_num_t pin) {
@@ -267,61 +285,82 @@ void MotorController::DriveForMs(int left_speed, int right_speed, int duration_m
     ExecuteStop();
 }
 
+bool MotorController::DriveForMsWithCancel(int left_speed, int right_speed, int duration_ms,
+                                           std::atomic<bool>& cancel) {
+    left_speed = std::clamp(left_speed, -100, 100);
+    right_speed = std::clamp(right_speed, -100, 100);
+    duration_ms = std::clamp(duration_ms, 0, 10000);
+    if (cancel.load(std::memory_order_acquire)) {
+        return false;
+    }
+    ExecuteMove(left_speed, right_speed, 0);
+    constexpr int kPollMs = 50;
+    int elapsed = 0;
+    while (elapsed < duration_ms) {
+        if (cancel.load(std::memory_order_acquire)) {
+            ExecuteStop();
+            return false;
+        }
+        const int slice = std::min(kPollMs, duration_ms - elapsed);
+        vTaskDelay(pdMS_TO_TICKS(slice));
+        elapsed += slice;
+    }
+    ExecuteStop();
+    return !cancel.load(std::memory_order_acquire);
+}
+
 namespace {
 
 #if CONFIG_BOARD_TYPE_BLUE_V2
-void StartDanceMusic() {
-    Application::GetInstance().Schedule([]() {
-        Application::GetInstance().PlaySound(Lang::Sounds::OGG_DANCE);
+void StartDanceMusic(uint8_t track) {
+    std::string_view sound = Lang::Sounds::OGG_DANCE1;
+    if (track == 3) {
+        sound = Lang::Sounds::OGG_DANCE3;
+    } else if (track == 2) {
+        sound = Lang::Sounds::OGG_DANCE2;
+    }
+    Application::GetInstance().Schedule([sound]() {
+        Application::GetInstance().PlaySound(sound);
     });
 }
 #endif
 
 }  // namespace
 
-void MotorController::RunDanceRoutine() {
-    struct Step {
-        int8_t left;
-        int8_t right;
-        int16_t duration_ms;
-        int16_t pause_ms;
-    };
-
-    // ~23 s routine synced to assets/common/dance.ogg (slap-house instrumental).
-    // Each step: DriveForMs + pause_ms (+ ~50 ms motor brake inside DriveForMs).
-    static constexpr Step kRoutine[] = {
-        // Intro — sway L/R on beat (~5 s)
-        {-72, 72, 380, 120}, {72, -72, 380, 120}, {-72, 72, 380, 120}, {72, -72, 380, 120},
-        {-72, 72, 380, 120}, {72, -72, 380, 120}, {-72, 72, 380, 120}, {72, -72, 380, 120},
-        {-72, 72, 380, 120}, {72, -72, 380, 120},
-        // Groove — forward / back bob (~5 s)
-        {68, 68, 420, 80}, {-68, -68, 420, 80}, {68, 68, 420, 80}, {-68, -68, 420, 80},
-        {68, 68, 420, 80}, {-68, -68, 420, 80}, {68, 68, 420, 80}, {-68, -68, 420, 80},
-        {68, 68, 420, 80}, {-68, -68, 420, 80},
-        // Build — faster wiggle (~4.2 s)
-        {-78, 78, 280, 70}, {78, -78, 280, 70}, {-78, 78, 280, 70}, {78, -78, 280, 70},
-        {-78, 78, 280, 70}, {78, -78, 280, 70},
-        // Drop — spin bursts (~5 s)
-        {-85, 85, 850, 150}, {-85, 85, 850, 150}, {-85, 85, 850, 150}, {-85, 85, 850, 150},
-        {-85, 85, 850, 150},
-        // Finale — pulse forward + last spin (~3.8 s)
-        {75, 75, 350, 100}, {75, 75, 350, 100}, {75, 75, 350, 100}, {75, 75, 350, 100},
-        {-90, 90, 1200, 0},
-    };
+void MotorController::RunDanceRoutine(uint8_t track) {
+    uint8_t normalized = 1;
+    if (track == 3) {
+        normalized = 3;
+    } else if (track == 2) {
+        normalized = 2;
+    }
+    dance_cancel_.store(false, std::memory_order_release);
+    dancing_.store(true, std::memory_order_release);
 
 #if CONFIG_BOARD_TYPE_BLUE_V2
-    StartDanceMusic();
+    StartDanceMusic(normalized);
+    ESP_LOGI(MOTOR_TAG, "Dance track %u start", static_cast<unsigned>(normalized));
+    if (normalized == 3) {
+        MotorDance::RunTrack3(*this, dance_cancel_);
+    } else if (normalized == 2) {
+        MotorDance::RunTrack2(*this, dance_cancel_);
+    } else {
+        MotorDance::RunTrack1(*this, dance_cancel_);
+    }
+#else
+    ESP_LOGW(MOTOR_TAG, "Dance track %u skipped — no choreography on this board",
+             static_cast<unsigned>(normalized));
 #endif
 
-    ESP_LOGI(MOTOR_TAG, "Dance start (%u steps, ~23 s + dance.ogg)",
-             static_cast<unsigned>(sizeof(kRoutine) / sizeof(kRoutine[0])));
-    for (const Step& step : kRoutine) {
-        DriveForMs(step.left, step.right, step.duration_ms);
-        if (step.pause_ms > 0) {
-            vTaskDelay(pdMS_TO_TICKS(step.pause_ms));
-        }
+    ExecuteStop();
+    const bool cancelled = dance_cancel_.load(std::memory_order_acquire);
+    dancing_.store(false, std::memory_order_release);
+    dance_cancel_.store(false, std::memory_order_release);
+    if (cancelled) {
+        ESP_LOGW(MOTOR_TAG, "Dance track %u cancelled", static_cast<unsigned>(normalized));
+    } else {
+        ESP_LOGI(MOTOR_TAG, "Dance track %u done", static_cast<unsigned>(normalized));
     }
-    ESP_LOGI(MOTOR_TAG, "Dance done");
 }
 
 void MotorController::ExecuteMove(int left_speed, int right_speed, int duration_ms) {
@@ -431,9 +470,13 @@ void MotorController::RegisterMcpTools() {
 
     mcp_server.AddTool(
         "self.motor.dance",
-        "Dance ~23 s with embedded slap-house music (wiggle, bob, spin). Use for: nhảy, múa, dance.",
-        PropertyList(),
-        [this](const PropertyList&) -> ReturnValue { return EnqueueDance(); });
+        "Dance with embedded music. track=1 slap-house ~23 s; track=2 hip-hop ~99 s; track=3 drill ~25 s. "
+        "Use for: nhảy, múa, dance, dance 1/2/3.",
+        PropertyList({Property("track", kPropertyTypeInteger, 1, 1, 3)}),
+        [this](const PropertyList& properties) -> ReturnValue {
+            const int track = properties["track"].value<int>();
+            return EnqueueDance(track);
+        });
 
     mcp_server.AddTool("self.chassis.go_forward", "Move forward", PropertyList(),
                        [this](const PropertyList&) -> ReturnValue {
@@ -455,6 +498,6 @@ void MotorController::RegisterMcpTools() {
                            return EnqueueMove(100, -100, MOTOR_AUTO_STOP_MS);
                        });
 
-    mcp_server.AddTool("self.chassis.dance", "Dance routine (wiggle + spin)", PropertyList(),
-                       [this](const PropertyList&) -> ReturnValue { return EnqueueDance(); });
+    mcp_server.AddTool("self.chassis.dance", "Dance routine track 1 (wiggle + spin)", PropertyList(),
+                       [this](const PropertyList&) -> ReturnValue { return EnqueueDance(1); });
 }

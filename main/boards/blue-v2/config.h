@@ -95,8 +95,11 @@
 #define MOTOR_RIGHT_IN1  GPIO_NUM_12
 #define MOTOR_RIGHT_IN2  GPIO_NUM_11
 #define MOTOR_AUTO_STOP_MS 5000
-// Embedded dance.ogg length (~23.5 s) — keep server mv:d cooldown in sync.
-#define MOTOR_DANCE_DURATION_MS 23500
+// Embedded dance1.ogg / dance2.ogg — keep server mv:d / mv:d2 cooldown in sync.
+#define MOTOR_DANCE1_DURATION_MS 23500
+#define MOTOR_DANCE2_DURATION_MS 99500
+#define MOTOR_DANCE3_DURATION_MS 25100
+#define MOTOR_DANCE_DURATION_MS MOTOR_DANCE1_DURATION_MS
 // Active brake (IN1=IN2=HIGH) before coast on stop — FS_MX1508 motorBrake() pattern, reduces mechanical jitter.
 #define MOTOR_BRAKE_ENABLE 1
 #define MOTOR_BRAKE_MS     50

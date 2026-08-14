@@ -63,10 +63,21 @@ public:
     /** Enqueue stop — clears pending moves. Returns false if queue full. */
     bool EnqueueStop();
 
-    /** Enqueue a fixed wiggle/spin dance routine (~8 s). Clears pending moves. */
-    bool EnqueueDance();
+    /** Enqueue dance routine (track 1 slap-house ~23 s, track 2 hip-hop ~99 s, track 3 drill ~25 s). */
+    bool EnqueueDance(int track = 1);
 
     bool IsMoving() const { return moving_.load(std::memory_order_acquire); }
+
+    bool IsDancing() const { return dancing_.load(std::memory_order_acquire); }
+
+    /** Touch / user cancel — stops motors and dance choreography loop. */
+    void RequestDanceStop();
+
+    static MotorController* Instance() { return instance_; }
+
+    /** Polls cancel every 50 ms; returns false if cancelled mid-step. */
+    bool DriveForMsWithCancel(int left_speed, int right_speed, int duration_ms,
+                              std::atomic<bool>& cancel);
 
     bool IsMovingForward() const {
         return left_speed_.load(std::memory_order_acquire) > 0 &&
@@ -90,6 +101,7 @@ private:
         int8_t left;
         int8_t right;
         int16_t duration_ms;
+        uint8_t dance_track = 1;
     };
 
     gpio_num_t left_in1_;
@@ -101,6 +113,8 @@ private:
     esp_timer_handle_t stop_timer_ = nullptr;
     bool gpio_initialized_ = false;
     std::atomic<bool> moving_{false};
+    std::atomic<bool> dancing_{false};
+    std::atomic<bool> dance_cancel_{false};
     std::atomic<int> left_speed_{0};
     std::atomic<int> right_speed_{0};
     int cached_level_left_in1_ = -1;
@@ -129,7 +143,7 @@ private:
     void DriveSide(gpio_num_t in1, gpio_num_t in2, int speed);
     void ScheduleAutoStop(int duration_ms);
     void DriveForMs(int left_speed, int right_speed, int duration_ms);
-    void RunDanceRoutine();
+    void RunDanceRoutine(uint8_t track);
     void RegisterMcpTools();
 };
 

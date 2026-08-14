@@ -336,6 +336,15 @@ private:
             }
         }
 
+#if BLUE_V2_OTTO_MOTOR_ENABLE || (!BLUE_V2_LCD_TEST_SCREEN && !BLUE_V2_OTTO_LCD_ONLY)
+        if (MotorController::Instance() != nullptr && MotorController::Instance()->IsDancing()) {
+            MotorController::Instance()->RequestDanceStop();
+            Application::GetInstance().GetAudioService().ResetDecoder();
+            ESP_LOGI(TAG, "Touch: dance stop");
+            return;
+        }
+#endif
+
         RestoreMicIfMuted();
         ESP_LOGI(TAG, "Touch: toggle chat");
         Application::GetInstance().ToggleChatState();
