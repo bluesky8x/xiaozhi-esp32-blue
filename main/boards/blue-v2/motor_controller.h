@@ -75,9 +75,9 @@ public:
 
     static MotorController* Instance() { return instance_; }
 
-    /** Polls cancel every 50 ms; returns false if cancelled mid-step. */
+    /** Polls cancel every 50 ms; optional tof_guard backs up on cliff/obstacle. */
     bool DriveForMsWithCancel(int left_speed, int right_speed, int duration_ms,
-                              std::atomic<bool>& cancel);
+                              std::atomic<bool>& cancel, bool tof_guard = false);
 
     bool IsMovingForward() const {
         return left_speed_.load(std::memory_order_acquire) > 0 &&

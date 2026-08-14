@@ -5,8 +5,10 @@
 #include "motor_controller.h"
 #include "settings.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <vector>
 #include <driver/gpio.h>
 #include <driver/i2c_master.h>
 #include <esp_log.h>
@@ -118,6 +120,28 @@ void TryAbortMeasurement(vl53l0x_handle_t sensor) {
     }
     (void)vl53l0x_stop_measurement(sensor, 500);
     (void)vl53l0x_clear_interrupt_mask(sensor);
+}
+
+/** Median of several valid front readings (mm). Returns 0 if too few good samples. */
+int MedianReadingMm(vl53l0x_handle_t sensor, int sample_count) {
+    if (sensor == nullptr || sample_count <= 0) {
+        return 0;
+    }
+    std::vector<int> readings;
+    readings.reserve(static_cast<size_t>(sample_count));
+    for (int i = 0; i < sample_count; ++i) {
+        vl53l0x_data_t sample = {};
+        if (vl53l0x_single_measure(sensor, &sample) == ESP_OK && sample.valid &&
+            sample.distance_mm >= 50 && sample.distance_mm <= TOF_MAX_VALID_MM) {
+            readings.push_back(static_cast<int>(sample.distance_mm));
+        }
+        vTaskDelay(pdMS_TO_TICKS(40));
+    }
+    if (readings.size() < 3) {
+        return 0;
+    }
+    std::sort(readings.begin(), readings.end());
+    return readings[readings.size() / 2];
 }
 
 }  // namespace
@@ -280,10 +304,10 @@ void TofController::RegisterMcpTools() {
 
     mcp.AddTool(
         "self.tof.calibrate",
-        "Calibrate VL53L0X on open floor at normal travel distance (distance_mm, default 400). "
-        "Hold robot still facing the floor ahead, then call. Saved distance becomes the safe "
-        "reference: stop if closer (obstacle) or farther (cliff) than calibrated range.",
-        PropertyList({Property("distance_mm", kPropertyTypeInteger, TOF_CALIBRATION_DISTANCE_MM, 50, 800)}),
+        "Calibrate VL53L0X on open floor. distance_mm=0 auto-uses median reading; default "
+        "128 mm is normal low-mount reading to floor. Saved distance is the safe reference "
+        "for obstacle/cliff guard.",
+        PropertyList({Property("distance_mm", kPropertyTypeInteger, 0, 0, 800)}),
         [this](const PropertyList& properties) -> ReturnValue {
             const int distance_mm = properties["distance_mm"].value<int>();
             return Calibrate(distance_mm);
@@ -607,7 +631,7 @@ std::string TofController::Calibrate(int distance_mm) {
     if (!ready_) {
         return JsonCalResult(false, distance_mm, 0, "sensor_not_ready");
     }
-    if (distance_mm < 50 || distance_mm > 800) {
+    if (distance_mm < 0 || distance_mm > 800) {
         return JsonCalResult(false, distance_mm, 0, "distance_out_of_range");
     }
 
@@ -615,21 +639,44 @@ std::string TofController::Calibrate(int distance_mm) {
     io_busy_ = true;
     auto* sensor = reinterpret_cast<vl53l0x_handle_t>(sensor_);
 
-    ESP_LOGI(TAG, "=== CALIBRATE: target %d mm — robot still, NO TTS/speaker ===", distance_mm);
+    const bool auto_mode = (distance_mm == 0);
+    constexpr int kCalSamples = 7;
+    const int median_mm = MedianReadingMm(sensor, kCalSamples);
 
-    vl53l0x_data_t probe = {};
-    if (vl53l0x_single_measure(sensor, &probe) == ESP_OK && probe.valid) {
-        const int reading = static_cast<int>(probe.distance_mm);
-        const int tol_mm = (distance_mm * 35 / 100) > 50 ? (distance_mm * 35 / 100) : 50;
-        if (AbsDeltaInt(reading, distance_mm) > tol_mm) {
-            ESP_LOGW(TAG, "Calibrate rejected: reading=%d mm, distance_mm=%d (tol ±%d)", reading,
-                     distance_mm, tol_mm);
+    int target_mm = distance_mm;
+    if (auto_mode) {
+        ESP_LOGI(TAG, "=== CALIBRATE AUTO — robot still, NO TTS/speaker ===");
+        if (median_mm < 50 || median_mm > 800) {
+            ESP_LOGW(TAG, "Auto calibrate rejected: median=%d mm (need open floor 50–800 mm)",
+                     median_mm);
             io_busy_ = false;
             char detail[96];
-            snprintf(detail, sizeof(detail), "distance_mismatch:reading_%d", reading);
+            snprintf(detail, sizeof(detail), "auto_reading_invalid:median_%d", median_mm);
+            return JsonCalResult(false, 0, 0, detail);
+        }
+        target_mm = median_mm;
+        ESP_LOGI(TAG, "Auto calibrate: median reading=%d mm", target_mm);
+    } else {
+        ESP_LOGI(TAG, "=== CALIBRATE: target %d mm — robot still, NO TTS/speaker ===",
+                 distance_mm);
+        if (median_mm <= 0) {
+            ESP_LOGW(TAG, "Calibrate rejected: no stable reading (target %d mm)", distance_mm);
+            io_busy_ = false;
+            return JsonCalResult(false, distance_mm, 0, "reading_unstable");
+        }
+        const int tol_mm = (distance_mm * 35 / 100) > 50 ? (distance_mm * 35 / 100) : 50;
+        if (AbsDeltaInt(median_mm, distance_mm) > tol_mm) {
+            ESP_LOGW(TAG,
+                     "Calibrate rejected: median=%d mm, distance_mm=%d (tol ±%d) — "
+                     "move robot to open floor or use auto (distance_mm=0)",
+                     median_mm, distance_mm, tol_mm);
+            io_busy_ = false;
+            char detail[96];
+            snprintf(detail, sizeof(detail), "distance_mismatch:median_%d", median_mm);
             return JsonCalResult(false, distance_mm, 0, detail);
         }
-        ESP_LOGI(TAG, "Precheck OK: reading=%d mm matches target %d mm", reading, distance_mm);
+        target_mm = distance_mm;
+        ESP_LOGI(TAG, "Precheck OK: median=%d mm matches target %d mm", median_mm, distance_mm);
     }
 
     auto fail = [&](const char* detail) -> std::string {
@@ -655,17 +702,18 @@ std::string TofController::Calibrate(int distance_mm) {
     ESP_LOGI(TAG, "ref_calibration OK vhv=%u phase=%u", ref_vhv_, ref_phase_);
 
     int32_t offset_um = 0;
-    err = vl53l0x_perform_offset_calibration(sensor, static_cast<float>(distance_mm), &offset_um);
+    err = vl53l0x_perform_offset_calibration(sensor, static_cast<float>(target_mm), &offset_um);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "offset_calibration failed: %s", esp_err_to_name(err));
         return fail("offset_calibration_failed");
     }
     offset_um_ = offset_um;
-    cal_distance_mm_ = distance_mm;
-    ESP_LOGI(TAG, "offset_calibration OK offset=%ld um @ %d mm", static_cast<long>(offset_um_), distance_mm);
+    cal_distance_mm_ = target_mm;
+    ESP_LOGI(TAG, "offset_calibration OK offset=%ld um @ %d mm", static_cast<long>(offset_um_),
+             target_mm);
 
     float xtalk = 0.0f;
-    err = vl53l0x_perform_xtalk_calibration(sensor, static_cast<float>(distance_mm), &xtalk);
+    err = vl53l0x_perform_xtalk_calibration(sensor, static_cast<float>(target_mm), &xtalk);
     if (err == ESP_OK) {
         xtalk_mcps_ = xtalk;
         vl53l0x_set_xtalk_compensation_enable(sensor, true);
@@ -684,8 +732,8 @@ std::string TofController::Calibrate(int distance_mm) {
     }
 
     io_busy_ = false;
-    ESP_LOGI(TAG, "=== CALIBRATE DONE saved to NVS ===");
-    return JsonCalResult(true, distance_mm, offset_um_, "saved");
+    ESP_LOGI(TAG, "=== CALIBRATE DONE saved to NVS (ref=%d mm) ===", cal_distance_mm_);
+    return JsonCalResult(true, cal_distance_mm_, offset_um_, "saved");
 }
 
 bool TofController::ClearCalibration() {

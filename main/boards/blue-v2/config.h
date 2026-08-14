@@ -99,6 +99,8 @@
 #define MOTOR_DANCE1_DURATION_MS 23500
 #define MOTOR_DANCE2_DURATION_MS 99500
 #define MOTOR_DANCE3_DURATION_MS 25100
+#define MOTOR_DANCE_TOF_BACKUP_MS    550
+#define MOTOR_DANCE_TOF_BACKUP_SPEED 85
 #define MOTOR_DANCE_DURATION_MS MOTOR_DANCE1_DURATION_MS
 // Active brake (IN1=IN2=HIGH) before coast on stop — FS_MX1508 motorBrake() pattern, reduces mechanical jitter.
 #define MOTOR_BRAKE_ENABLE 1
@@ -135,15 +137,21 @@
 #define TOF_CAL_JUMP_MARGIN_MM    80    // sudden extra deviation from cal in one step
 
 // Fallback cliff: jump from nearest reading this move leg (mm).
-#define TOF_CLIFF_JUMP_MM         150
-#define TOF_CLIFF_NEAR_MAX_MM     280   // jump/lost-signal cliff only if was this close first
+#define TOF_CLIFF_JUMP_MM         80
+#define TOF_CLIFF_NEAR_MAX_MM     160   // jump/lost-signal cliff only if was this close first
 
-// Ignore guard for this long after motor start (I2C/vibration settle); cliff still checked.
+// Ignore obstacle guard for this long after motor start (I2C/vibration settle).
+// Cliff checks still run during grace (see tof_motor_guard.cc).
 #define TOF_MOVE_GRACE_MS         150
 
-// Fallback fixed thresholds when NOT calibrated yet:
-#define TOF_OBSTACLE_STOP_MM      120
-#define TOF_CLIFF_VOID_MM         450
+// Edge pre-move buffer — fallback ONLY when not calibrated (see EdgePreMoveBufferMm()).
+#define TOF_EDGE_PREMOVE_BUFFER_MM 30
+// When calibrated: buffer = max(cal * pct / 100, TOF_CAL_FAR_MARGIN_MM / 2).
+#define TOF_EDGE_PREMOVE_BUFFER_PCT 10
+
+// Fallback fixed thresholds when NOT calibrated yet (sensor ~128 mm to open floor):
+#define TOF_OBSTACLE_STOP_MM      96
+#define TOF_CLIFF_VOID_MM         200
 
 // Rear/down sensor (optional):
 #define TOF_CLIFF_FLOOR_MAX_MM    120
@@ -157,8 +165,8 @@
 #define TOF_DEBUG_IDLE_LOG_MS     1000   // log range while motors idle
 #define TOF_DEBUG_MOVE_LOG_MS     150    // log range while any motor motion
 
-// Calibrate on open floor at normal travel distance (e.g. 300–450 mm on a table).
-#define TOF_CALIBRATION_DISTANCE_MM 400
+// Calibrate on open floor — default reading with low-mounted front sensor (~128 mm to floor).
+#define TOF_CALIBRATION_DISTANCE_MM 128
 
 // N16R8 — DO NOT USE (module / strapping / USB-JTAG):
 //   3, 19–20, 26–34, 35–37, 45–46

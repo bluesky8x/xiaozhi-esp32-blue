@@ -3,6 +3,7 @@
 #include "config.h"
 #include "tof_controller.h"
 
+#include <atomic>
 #include <cstdlib>
 #include <esp_log.h>
 
@@ -13,6 +14,15 @@ extern "C" {
 #define TAG "TofSafety"
 
 namespace {
+
+std::atomic<bool> g_cliff_edge_blocked{false};
+
+bool IsCliffReason(TofSafetyStopReason reason) {
+    return reason == TofSafetyStopReason::CliffFloor ||
+           reason == TofSafetyStopReason::CliffFar ||
+           reason == TofSafetyStopReason::CliffJump ||
+           reason == TofSafetyStopReason::CliffLostSignal;
+}
 
 bool SampleUsable(const vl53l0x_data_t& sample) {
     return sample.valid && sample.distance_mm > 0 && sample.distance_mm <= TOF_MAX_VALID_MM;
@@ -28,6 +38,32 @@ int FarLimit(int cal_mm) {
     const int pct = cal_mm * (100 + TOF_CAL_FAR_MARGIN_PCT) / 100;
     const int abs = cal_mm + TOF_CAL_FAR_MARGIN_MM;
     return pct < abs ? pct : abs;
+}
+
+/** Fallback mm when not calibrated; else derived from cal + TOF_CAL_FAR margins. */
+int EdgePreMoveBufferMm(int cal_mm) {
+    if (cal_mm <= 0) {
+        return TOF_EDGE_PREMOVE_BUFFER_MM;
+    }
+    const int pct_buf = cal_mm * TOF_EDGE_PREMOVE_BUFFER_PCT / 100;
+    const int half_far = TOF_CAL_FAR_MARGIN_MM / 2;
+    return pct_buf > half_far ? pct_buf : half_far;
+}
+
+/** Block forward pre-move when dist >= this (cal-based or fallback void threshold). */
+int EdgeProximityLimitMm(int cal_mm) {
+    if (cal_mm <= 0) {
+        return TOF_CLIFF_VOID_MM - TOF_EDGE_PREMOVE_BUFFER_MM;
+    }
+    return FarLimit(cal_mm) - EdgePreMoveBufferMm(cal_mm);
+}
+
+/** Latch clear: forward allowed again when dist <= this (back in safe zone near cal). */
+int SafeForwardDistanceMm(int cal_mm) {
+    if (cal_mm <= 0) {
+        return TOF_CLIFF_VOID_MM - (2 * TOF_EDGE_PREMOVE_BUFFER_MM);
+    }
+    return cal_mm + EdgePreMoveBufferMm(cal_mm);
 }
 
 TofSafetyStopReason CheckFrontCliffInvalid(const vl53l0x_data_t& sample, int far_limit_mm,
@@ -54,15 +90,18 @@ TofSafetyStopReason CheckFrontCliffInvalid(const vl53l0x_data_t& sample, int far
 #endif
 }
 
-TofSafetyStopReason CheckFrontCalibrated(const vl53l0x_data_t& sample, int cal_mm) {
+TofSafetyStopReason CheckFrontCalibrated(const vl53l0x_data_t& sample, int cal_mm,
+                                         bool edge_proximity) {
 #if !TOF_OBSTACLE_GUARD_ENABLE && !TOF_CLIFF_GUARD_ENABLE
     (void)sample;
     (void)cal_mm;
+    (void)edge_proximity;
     return TofSafetyStopReason::None;
 #endif
 
     const int near_limit = NearLimit(cal_mm);
     const int far_limit = FarLimit(cal_mm);
+    const int edge_block_mm = EdgeProximityLimitMm(cal_mm);
 
     if (SampleUsable(sample)) {
         const int dist = static_cast<int>(sample.distance_mm);
@@ -73,6 +112,9 @@ TofSafetyStopReason CheckFrontCalibrated(const vl53l0x_data_t& sample, int cal_m
 #endif
 #if TOF_CLIFF_GUARD_ENABLE
         if (dist > far_limit) {
+            return TofSafetyStopReason::CliffFar;
+        }
+        if (edge_proximity && dist >= edge_block_mm) {
             return TofSafetyStopReason::CliffFar;
         }
 #endif
@@ -92,11 +134,14 @@ TofSafetyStopReason CheckFrontCalibrated(const vl53l0x_data_t& sample, int cal_m
 #endif
 }
 
-TofSafetyStopReason CheckFrontFallback(const vl53l0x_data_t& sample) {
+TofSafetyStopReason CheckFrontFallback(const vl53l0x_data_t& sample, bool edge_proximity) {
 #if !TOF_OBSTACLE_GUARD_ENABLE && !TOF_CLIFF_GUARD_ENABLE
     (void)sample;
+    (void)edge_proximity;
     return TofSafetyStopReason::None;
 #endif
+
+    const int edge_block_mm = EdgeProximityLimitMm(0);
 
     if (SampleUsable(sample)) {
 #if TOF_OBSTACLE_GUARD_ENABLE
@@ -106,6 +151,10 @@ TofSafetyStopReason CheckFrontFallback(const vl53l0x_data_t& sample) {
 #endif
 #if TOF_CLIFF_GUARD_ENABLE
         if (sample.distance_mm >= TOF_CLIFF_VOID_MM) {
+            return TofSafetyStopReason::CliffFar;
+        }
+        if (edge_proximity &&
+            static_cast<int>(sample.distance_mm) >= edge_block_mm) {
             return TofSafetyStopReason::CliffFar;
         }
 #endif
@@ -134,6 +183,24 @@ TofSafetyStopReason CheckRear(const vl53l0x_data_t& sample) {
 #endif
 }
 
+bool ForwardDistanceLooksSafe(const TofSnapshot& snap) {
+    if (!snap.front_ok) {
+        return false;
+    }
+
+    auto& tof = TofController::Instance();
+    const bool use_cal = tof.IsCalibrated();
+    const int cal_mm = use_cal ? tof.CalibratedDistanceMm() : 0;
+
+    if (SampleUsable(snap.front)) {
+        const int dist = static_cast<int>(snap.front.distance_mm);
+        const int safe_mm = SafeForwardDistanceMm(use_cal && cal_mm > 0 ? cal_mm : 0);
+        return dist <= safe_mm;
+    }
+
+    return false;
+}
+
 bool NeedsFrontCheck(int left, int right) {
     return !(left < 0 && right < 0);
 }
@@ -143,6 +210,17 @@ bool NeedsRearCheck(int left, int right) {
 }
 
 }  // namespace
+
+void TofNotifyCliffStop(TofSafetyStopReason reason) {
+    if (IsCliffReason(reason)) {
+        g_cliff_edge_blocked.store(true, std::memory_order_release);
+        ESP_LOGW(TAG, "Cliff edge latch set (%s)", TofSafetyStopReasonName(reason));
+    }
+}
+
+bool TofIsCliffEdgeBlocked() {
+    return g_cliff_edge_blocked.load(std::memory_order_acquire);
+}
 
 const char* TofSafetyStopReasonName(TofSafetyStopReason reason) {
     switch (reason) {
@@ -175,19 +253,20 @@ TofSafetyStopReason TofEvaluateMoveSnapshot(int left_speed, int right_speed,
     auto& tof = TofController::Instance();
     const bool use_cal = tof.IsCalibrated();
     const int cal_mm = use_cal ? tof.CalibratedDistanceMm() : 0;
+    const bool forward_check = NeedsFrontCheck(left_speed, right_speed);
 
     TofSafetyStopReason reason = TofSafetyStopReason::None;
 
-    if (NeedsFrontCheck(left_speed, right_speed) && snap.front_ok) {
+    if (forward_check && snap.front_ok) {
         if (use_cal && cal_mm > 0) {
-            reason = CheckFrontCalibrated(snap.front, cal_mm);
+            reason = CheckFrontCalibrated(snap.front, cal_mm, true);
         } else {
-            reason = CheckFrontFallback(snap.front);
+            reason = CheckFrontFallback(snap.front, true);
         }
         if (reason != TofSafetyStopReason::None) {
             return reason;
         }
-    } else if (NeedsFrontCheck(left_speed, right_speed) && !snap.front_ok) {
+    } else if (forward_check && !snap.front_ok) {
         return TofSafetyStopReason::SampleFailed;
     }
 
@@ -219,13 +298,38 @@ bool TofPreMoveCheck(int left_speed, int right_speed, TofSafetyStopReason* reaso
         return true;
     }
 
+    const bool forward_move = NeedsFrontCheck(left_speed, right_speed);
+    const bool backward_move = left_speed < 0 && right_speed < 0;
+
     TofSnapshot snap{};
     if (!tof.SampleOnDemand(&snap)) {
+        if (forward_move && TofIsCliffEdgeBlocked()) {
+            ESP_LOGW(TAG, "Pre-move: sample failed at cliff edge — block forward L=%d R=%d",
+                     left_speed, right_speed);
+            if (reason_out) {
+                *reason_out = TofSafetyStopReason::CliffFar;
+            }
+            return false;
+        }
         ESP_LOGW(TAG, "Pre-move: sample failed — block move L=%d R=%d", left_speed, right_speed);
         if (reason_out) {
             *reason_out = TofSafetyStopReason::SampleFailed;
         }
         return false;
+    }
+
+    if (forward_move && TofIsCliffEdgeBlocked()) {
+        if (ForwardDistanceLooksSafe(snap)) {
+            g_cliff_edge_blocked.store(false, std::memory_order_release);
+            ESP_LOGI(TAG, "Cliff edge latch cleared — safe distance restored");
+        } else {
+            ESP_LOGW(TAG, "Pre-move BLOCKED cliff_edge_latch front=%u mm L=%d R=%d",
+                     snap.front.distance_mm, left_speed, right_speed);
+            if (reason_out) {
+                *reason_out = TofSafetyStopReason::CliffFar;
+            }
+            return false;
+        }
     }
 
     const TofSafetyStopReason reason = TofEvaluateMoveSnapshot(left_speed, right_speed, snap);
@@ -234,6 +338,9 @@ bool TofPreMoveCheck(int left_speed, int right_speed, TofSafetyStopReason* reaso
     }
 
     if (reason == TofSafetyStopReason::None) {
+        if (backward_move) {
+            g_cliff_edge_blocked.store(false, std::memory_order_release);
+        }
         ESP_LOGI(TAG, "Pre-move OK front=%u mm rear=%u mm L=%d R=%d", snap.front.distance_mm,
                  snap.rear_ok ? snap.rear.distance_mm : 0U, left_speed, right_speed);
         return true;

@@ -2,6 +2,7 @@
 
 #include "config.h"
 #include "tof_controller.h"
+#include "tof_safety_check.h"
 
 #include <cstdlib>
 #include <climits>
@@ -118,14 +119,37 @@ StopReason CheckFrontCliffInvalid(const vl53l0x_data_t& sample, int far_limit_mm
 #endif
 }
 
+TofSafetyStopReason ToTofSafetyReason(StopReason reason) {
+    switch (reason) {
+        case StopReason::Obstacle:
+            return TofSafetyStopReason::Obstacle;
+        case StopReason::CliffFloor:
+            return TofSafetyStopReason::CliffFloor;
+        case StopReason::CliffFar:
+            return TofSafetyStopReason::CliffFar;
+        case StopReason::CliffJump:
+            return TofSafetyStopReason::CliffJump;
+        case StopReason::CliffLostSignal:
+            return TofSafetyStopReason::CliffLostSignal;
+        default:
+            return TofSafetyStopReason::None;
+    }
+}
+
+bool IsCliffStopReason(StopReason reason) {
+    return reason == StopReason::CliffFloor || reason == StopReason::CliffFar ||
+           reason == StopReason::CliffJump || reason == StopReason::CliffLostSignal;
+}
+
 StopReason CheckFrontCalibrated(const vl53l0x_data_t& sample, int cal_mm, uint16_t prev_dist,
-                                bool prev_valid, uint16_t move_min_dist) {
+                                bool prev_valid, uint16_t move_min_dist, bool cliff_only) {
 #if !TOF_OBSTACLE_GUARD_ENABLE && !TOF_CLIFF_GUARD_ENABLE
     (void)sample;
     (void)cal_mm;
     (void)prev_dist;
     (void)prev_valid;
     (void)move_min_dist;
+    (void)cliff_only;
     return StopReason::None;
 #endif
 
@@ -135,12 +159,14 @@ StopReason CheckFrontCalibrated(const vl53l0x_data_t& sample, int cal_mm, uint16
     if (SampleUsable(sample)) {
         const int dist = static_cast<int>(sample.distance_mm);
 #if TOF_OBSTACLE_GUARD_ENABLE
-        if (dist < near_limit) {
-            return StopReason::Obstacle;
-        }
-        if (prev_valid && static_cast<int>(prev_dist) >= near_limit &&
-            dist <= static_cast<int>(prev_dist) - TOF_CAL_APPROACH_STEP_MM) {
-            return StopReason::Obstacle;
+        if (!cliff_only) {
+            if (dist < near_limit) {
+                return StopReason::Obstacle;
+            }
+            if (prev_valid && static_cast<int>(prev_dist) >= near_limit &&
+                dist <= static_cast<int>(prev_dist) - TOF_CAL_APPROACH_STEP_MM) {
+                return StopReason::Obstacle;
+            }
         }
 #endif
 #if TOF_CLIFF_GUARD_ENABLE
@@ -151,7 +177,7 @@ StopReason CheckFrontCalibrated(const vl53l0x_data_t& sample, int cal_mm, uint16
         if (dist > far_limit) {
             return StopReason::CliffFar;
         }
-        if (prev_valid) {
+        if (!cliff_only && prev_valid) {
             const int prev_dev = AbsDelta(static_cast<int>(prev_dist), cal_mm);
             const int cur_dev = AbsDelta(dist, cal_mm);
             if (cur_dev >= prev_dev + TOF_CAL_JUMP_MARGIN_MM) {
@@ -163,8 +189,7 @@ StopReason CheckFrontCalibrated(const vl53l0x_data_t& sample, int cal_mm, uint16
     }
 
 #if TOF_OBSTACLE_GUARD_ENABLE
-    // Very close but invalid (min range / signal fail) — treat as obstacle while moving.
-    if (sample.distance_mm > 0 && sample.distance_mm < near_limit) {
+    if (!cliff_only && sample.distance_mm > 0 && sample.distance_mm < near_limit) {
         return StopReason::Obstacle;
     }
 #endif
@@ -186,18 +211,19 @@ StopReason CheckFrontCalibrated(const vl53l0x_data_t& sample, int cal_mm, uint16
 }
 
 StopReason CheckFrontFallback(const vl53l0x_data_t& sample, uint16_t prev_dist, bool prev_valid,
-                              uint16_t move_min_dist) {
+                              uint16_t move_min_dist, bool cliff_only) {
 #if !TOF_OBSTACLE_GUARD_ENABLE && !TOF_CLIFF_GUARD_ENABLE
     (void)sample;
     (void)prev_dist;
     (void)prev_valid;
     (void)move_min_dist;
+    (void)cliff_only;
     return StopReason::None;
 #endif
 
     if (SampleUsable(sample)) {
 #if TOF_OBSTACLE_GUARD_ENABLE
-        if (sample.distance_mm <= TOF_OBSTACLE_STOP_MM) {
+        if (!cliff_only && sample.distance_mm <= TOF_OBSTACLE_STOP_MM) {
             return StopReason::Obstacle;
         }
 #endif
@@ -383,18 +409,29 @@ void TofMotorGuard::PollOnce() {
             }
 
             const bool check_cliff = check_front;
-            const bool check_obstacle = check_front;
+            const bool check_obstacle = check_front && !in_move_grace;
 
-            if (!in_move_grace && check_obstacle) {
+            if (check_cliff || check_obstacle) {
                 StopReason reason = StopReason::None;
                 if (front_ok) {
                     if (check_cliff) {
                         if (use_cal && cal_mm > 0) {
                             reason = CheckFrontCalibrated(front, cal_mm, prev_front_dist,
-                                                           prev_front_valid, move_min_front_dist);
+                                                           prev_front_valid, move_min_front_dist,
+                                                           true);
                         } else {
                             reason = CheckFrontFallback(front, prev_front_dist, prev_front_valid,
-                                                        move_min_front_dist);
+                                                        move_min_front_dist, true);
+                        }
+                    }
+                    if (reason == StopReason::None && check_obstacle) {
+                        if (use_cal && cal_mm > 0) {
+                            reason = CheckFrontCalibrated(front, cal_mm, prev_front_dist,
+                                                           prev_front_valid, move_min_front_dist,
+                                                           false);
+                        } else {
+                            reason = CheckFrontFallback(front, prev_front_dist, prev_front_valid,
+                                                        move_min_front_dist, false);
                         }
                     }
                     if (SampleUsable(front)) {
@@ -405,7 +442,7 @@ void TofMotorGuard::PollOnce() {
                     }
                 } else if (check_cliff && move_measure_fail_streak >= 4) {
                     reason = StopReason::CliffLostSignal;
-                } else if (move_measure_fail_streak >= 8) {
+                } else if (check_obstacle && move_measure_fail_streak >= 8) {
                     reason = StopReason::Obstacle;
                 } else {
                     move_measure_fail_streak++;
@@ -417,6 +454,9 @@ void TofMotorGuard::PollOnce() {
                     ESP_LOGW(TAG, ">>> STOP %s front=%u mm cal_ref=%d valid=%d rear=%u mm age=%lld",
                              StopReasonName(reason), front.distance_mm, cal_mm, front.valid,
                              rear_ok ? rear.distance_mm : 0U, static_cast<long long>(snap_age_ms));
+                    if (IsCliffStopReason(reason)) {
+                        TofNotifyCliffStop(ToTofSafetyReason(reason));
+                    }
                     motor_->EnqueueStop();
                     was_moving = false;
                     motor_move_started_ms = 0;

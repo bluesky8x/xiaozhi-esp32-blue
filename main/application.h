@@ -155,10 +155,14 @@ private:
     bool assets_version_checked_ = false;
     bool play_popup_on_listening_ = false;  // Flag to play popup sound after state changes to listening
     bool skip_popup_on_next_listen_ = false;  // First listen after connect (server startup greeting)
-    bool pending_listening_start_ = false;  // Waiting for playback to drain before starting listening (auto mode)
+    bool pending_listening_start_ = false;  // Wait for playback drain before enabling mic
+    bool tts_stop_received_ = false;        // tts stop JSON — finish only after playback + grace
+    int64_t speaking_finish_deadline_us_ = 0;  // Earliest time to leave speaking after tts stop
     int64_t last_listen_start_us_ = 0;  // Debounce duplicate SendStartListening (robot resync)
     int64_t last_uplink_reconnect_us_ = 0;  // Cooldown after WebSocket send failure
     int64_t speaking_playback_idle_since_us_ = 0;  // Watchdog: speaking with no playback
+    bool speaking_awaiting_audio_ = false;         // tts start received, no downlink yet
+    int64_t speaking_started_us_ = 0;              // For slow tool/LLM before first TTS frame
     bool defer_blue_v2_heavy_init_ = false;  // Defer motor PWM + I2S until activation (SPI flush safe)
     int clock_ticks_ = 0;
     TaskHandle_t activation_task_handle_ = nullptr;
@@ -177,6 +181,7 @@ private:
     void BeginWakeWordInvoke(const std::string& wake_word);
     void ContinueWakeWordInvoke(const std::string& wake_word);
     void StartListeningAudio();
+    void FinishSpeakingAfterTts();
     void ConfigureWakeWordForListening();
     void EnsureListeningAfterRobotAction();
     void ResyncListeningAfterMotorStop();

@@ -185,6 +185,13 @@ void MotorController::RequestDanceStop() {
     }
     dance_cancel_.store(true, std::memory_order_release);
     EnqueueStop();
+#if CONFIG_BOARD_TYPE_BLUE_V2
+    auto& app = Application::GetInstance();
+    if (app.GetDeviceState() == kDeviceStateSpeaking) {
+        app.AbortSpeaking(kAbortReasonNone);
+    }
+    app.GetAudioService().ResetDecoder();
+#endif
 }
 
 int* MotorController::LevelCacheFor(gpio_num_t pin) {
@@ -286,13 +293,16 @@ void MotorController::DriveForMs(int left_speed, int right_speed, int duration_m
 }
 
 bool MotorController::DriveForMsWithCancel(int left_speed, int right_speed, int duration_ms,
-                                           std::atomic<bool>& cancel) {
+                                           std::atomic<bool>& cancel, bool tof_guard) {
     left_speed = std::clamp(left_speed, -100, 100);
     right_speed = std::clamp(right_speed, -100, 100);
     duration_ms = std::clamp(duration_ms, 0, 10000);
     if (cancel.load(std::memory_order_acquire)) {
         return false;
     }
+
+    const bool watch_tof = tof_guard && !(left_speed < 0 && right_speed < 0);
+
     ExecuteMove(left_speed, right_speed, 0);
     constexpr int kPollMs = 50;
     int elapsed = 0;
@@ -300,6 +310,41 @@ bool MotorController::DriveForMsWithCancel(int left_speed, int right_speed, int 
         if (cancel.load(std::memory_order_acquire)) {
             ExecuteStop();
             return false;
+        }
+        if (watch_tof) {
+            auto& tof = TofController::Instance();
+            if (tof.IsReady()) {
+                TofSnapshot snap{};
+                if (tof.GetLatestSnapshot(&snap)) {
+                    const int64_t now_ms = esp_timer_get_time() / 1000;
+                    const int64_t snap_age_ms = now_ms - snap.timestamp_ms;
+                    if (snap_age_ms <= static_cast<int64_t>(TOF_GUARD_POLL_MS * 4)) {
+                        const TofSafetyStopReason reason =
+                            TofEvaluateMoveSnapshot(left_speed, right_speed, snap);
+                        if (reason != TofSafetyStopReason::None &&
+                            reason != TofSafetyStopReason::CliffFloor) {
+                            ESP_LOGW(MOTOR_TAG, "Dance ToF %s — backing up",
+                                     TofSafetyStopReasonName(reason));
+                            TofNotifyCliffStop(reason);
+                            ExecuteStop();
+                            if (!cancel.load(std::memory_order_acquire)) {
+                                ExecuteMove(-MOTOR_DANCE_TOF_BACKUP_SPEED,
+                                            -MOTOR_DANCE_TOF_BACKUP_SPEED, 0);
+                                int backup_elapsed = 0;
+                                while (backup_elapsed < MOTOR_DANCE_TOF_BACKUP_MS &&
+                                       !cancel.load(std::memory_order_acquire)) {
+                                    const int slice =
+                                        std::min(kPollMs, MOTOR_DANCE_TOF_BACKUP_MS - backup_elapsed);
+                                    vTaskDelay(pdMS_TO_TICKS(slice));
+                                    backup_elapsed += slice;
+                                }
+                                ExecuteStop();
+                            }
+                            return !cancel.load(std::memory_order_acquire);
+                        }
+                    }
+                }
+            }
         }
         const int slice = std::min(kPollMs, duration_ms - elapsed);
         vTaskDelay(pdMS_TO_TICKS(slice));
@@ -435,14 +480,14 @@ void MotorController::RegisterMcpTools() {
                        "Turn robot left in place. Use for: quay sang trái, rẽ trái, turn left.",
                        PropertyList(),
                        [this](const PropertyList&) -> ReturnValue {
-                           return EnqueueMove(-100, 100, MOTOR_AUTO_STOP_MS);
+                           return EnqueueMove(100, -100, MOTOR_AUTO_STOP_MS);
                        });
 
     mcp_server.AddTool("self.motor.turn_right",
                        "Turn robot right in place. Use for: quay sang phải, rẽ phải, turn right.",
                        PropertyList(),
                        [this](const PropertyList&) -> ReturnValue {
-                           return EnqueueMove(100, -100, MOTOR_AUTO_STOP_MS);
+                           return EnqueueMove(-100, 100, MOTOR_AUTO_STOP_MS);
                        });
 
     mcp_server.AddTool(
@@ -490,12 +535,12 @@ void MotorController::RegisterMcpTools() {
 
     mcp_server.AddTool("self.chassis.turn_left", "Turn left", PropertyList(),
                        [this](const PropertyList&) -> ReturnValue {
-                           return EnqueueMove(-100, 100, MOTOR_AUTO_STOP_MS);
+                           return EnqueueMove(100, -100, MOTOR_AUTO_STOP_MS);
                        });
 
     mcp_server.AddTool("self.chassis.turn_right", "Turn right", PropertyList(),
                        [this](const PropertyList&) -> ReturnValue {
-                           return EnqueueMove(100, -100, MOTOR_AUTO_STOP_MS);
+                           return EnqueueMove(-100, 100, MOTOR_AUTO_STOP_MS);
                        });
 
     mcp_server.AddTool("self.chassis.dance", "Dance routine track 1 (wiggle + spin)", PropertyList(),

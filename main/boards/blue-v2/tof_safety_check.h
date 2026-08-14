@@ -25,4 +25,9 @@ TofSafetyStopReason TofEvaluateMoveSnapshot(int left_speed, int right_speed,
  */
 bool TofPreMoveCheck(int left_speed, int right_speed, TofSafetyStopReason* reason_out);
 
+/** Called when guard stops motors for a cliff-related reason. */
+void TofNotifyCliffStop(TofSafetyStopReason reason);
+
+bool TofIsCliffEdgeBlocked();
+
 #endif  // BLUE_V2_TOF_SAFETY_CHECK_H_

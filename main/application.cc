@@ -269,8 +269,10 @@ void Application::Run() {
         }
 
         if (bits & MAIN_EVENT_PLAYBACK_DRAINED) {
-            // Deferred listening start (auto mode): the playback queue has
-            // drained, so it is now safe to enable voice processing.
+            if (GetDeviceState() == kDeviceStateSpeaking && tts_stop_received_ &&
+                audio_service_.IsPlaybackIdle()) {
+                speaking_finish_deadline_us_ = esp_timer_get_time() + 1500 * 1000LL;
+            }
             if (GetDeviceState() == kDeviceStateListening &&
                 audio_service_.IsPlaybackIdle()) {
                 if (pending_listening_start_ ||
@@ -333,14 +335,42 @@ void Application::Run() {
             if (GetDeviceState() == kDeviceStateSpeaking &&
                 audio_service_.IsPlaybackIdle()) {
                 const int64_t now_us = esp_timer_get_time();
-                if (speaking_playback_idle_since_us_ == 0) {
-                    speaking_playback_idle_since_us_ = now_us;
-                } else if (now_us - speaking_playback_idle_since_us_ > 10 * 1000000LL) {
-                    ESP_LOGW(TAG,
-                             "Speaking stuck with idle playback — forcing listening");
-                    speaking_playback_idle_since_us_ = 0;
-                    SetDeviceState(kDeviceStateListening);
-                    ScheduleListeningResyncAfterRobotAction();
+
+                if (tts_stop_received_ && speaking_finish_deadline_us_ > 0 &&
+                    now_us >= speaking_finish_deadline_us_) {
+                    ESP_LOGI(TAG, "TTS stop + playback idle — leaving speaking");
+                    tts_stop_received_ = false;
+                    speaking_finish_deadline_us_ = 0;
+                    FinishSpeakingAfterTts();
+                } else if (!tts_stop_received_) {
+                    const int64_t idle_limit_us = speaking_awaiting_audio_
+                                                      ? 45 * 1000000LL
+                                                      : 10 * 1000000LL;
+                    const int64_t elapsed_us =
+                        speaking_awaiting_audio_ ? (now_us - speaking_started_us_)
+                                                 : (speaking_playback_idle_since_us_ > 0
+                                                        ? now_us - speaking_playback_idle_since_us_
+                                                        : 0);
+                    if (speaking_awaiting_audio_) {
+                        if (speaking_started_us_ == 0) {
+                            speaking_started_us_ = now_us;
+                        } else if (elapsed_us > idle_limit_us) {
+                            ESP_LOGW(TAG,
+                                     "Speaking stuck awaiting first TTS (%lld s) — forcing listening",
+                                     static_cast<long long>(elapsed_us / 1000000LL));
+                            speaking_awaiting_audio_ = false;
+                            speaking_playback_idle_since_us_ = 0;
+                            speaking_started_us_ = 0;
+                            FinishSpeakingAfterTts();
+                        }
+                    } else if (speaking_playback_idle_since_us_ == 0) {
+                        speaking_playback_idle_since_us_ = now_us;
+                    } else if (elapsed_us > idle_limit_us) {
+                        ESP_LOGW(TAG,
+                                 "Speaking stuck with idle playback — forcing listening");
+                        speaking_playback_idle_since_us_ = 0;
+                        FinishSpeakingAfterTts();
+                    }
                 }
             } else {
                 speaking_playback_idle_since_us_ = 0;
@@ -687,8 +717,31 @@ void Application::InitializeProtocol() {
     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
         // Accept downlink while listening or speaking. tts start may still be queued on the
         // main loop; dropping packets here causes "text on screen, no speaker" symptoms.
+        if (aborted_) {
+            return;
+        }
         const auto state = GetDeviceState();
         if (state == kDeviceStateSpeaking || state == kDeviceStateListening) {
+            if (state == kDeviceStateSpeaking) {
+                speaking_awaiting_audio_ = false;
+                speaking_playback_idle_since_us_ = 0;
+                if (tts_stop_received_) {
+                    tts_stop_received_ = false;
+                    speaking_finish_deadline_us_ = 0;
+                }
+            } else if (listening_mode_ != kListeningModeRealtime) {
+                if (audio_service_.IsAudioProcessorRunning()) {
+                    audio_service_.EnableVoiceProcessing(false);
+                }
+                pending_listening_start_ = false;
+                tts_stop_received_ = false;
+                speaking_finish_deadline_us_ = 0;
+                Schedule([this]() {
+                    if (GetDeviceState() == kDeviceStateListening) {
+                        SetDeviceState(kDeviceStateSpeaking);
+                    }
+                });
+            }
             audio_service_.PushPacketToDecodeQueue(std::move(packet));
         }
     });
@@ -728,6 +781,11 @@ void Application::InitializeProtocol() {
             }
             if (strcmp(state->valuestring, "start") == 0) {
                 aborted_ = false;
+                tts_stop_received_ = false;
+                speaking_finish_deadline_us_ = 0;
+                speaking_awaiting_audio_ = true;
+                speaking_started_us_ = esp_timer_get_time();
+                speaking_playback_idle_since_us_ = 0;
                 const auto prev = GetDeviceState();
                 if (prev != kDeviceStateSpeaking) {
                     SetDeviceState(kDeviceStateSpeaking);
@@ -738,14 +796,32 @@ void Application::InitializeProtocol() {
                     }
                 }
             } else if (strcmp(state->valuestring, "stop") == 0) {
-                if (GetDeviceState() == kDeviceStateSpeaking) {
-                    if (listening_mode_ == kListeningModeManualStop) {
-                        SetDeviceState(kDeviceStateIdle);
-                    } else {
-                        SetDeviceState(kDeviceStateListening);
+                speaking_awaiting_audio_ = false;
+                speaking_started_us_ = 0;
+                if (GetDeviceState() == kDeviceStateSpeaking ||
+                    GetDeviceState() == kDeviceStateListening) {
+                    tts_stop_received_ = true;
+                    // Stay speaking until playback drains + grace (more sentences may follow).
+                    speaking_finish_deadline_us_ =
+                        esp_timer_get_time() + 1500 * 1000LL;
+                    if (GetDeviceState() == kDeviceStateListening) {
+                        pending_listening_start_ = false;
+                        SetDeviceState(kDeviceStateSpeaking);
                     }
+                    ESP_LOGI(TAG, "TTS stop — wait playback finish before mic on");
                 }
             } else if (strcmp(state->valuestring, "sentence_start") == 0) {
+                tts_stop_received_ = false;
+                speaking_finish_deadline_us_ = 0;
+                speaking_playback_idle_since_us_ = 0;
+                if (speaking_awaiting_audio_) {
+                    speaking_started_us_ = esp_timer_get_time();
+                }
+                if (GetDeviceState() == kDeviceStateListening) {
+                    ESP_LOGW(TAG, "TTS sentence while listening — back to speaking (mic off)");
+                    pending_listening_start_ = false;
+                    SetDeviceState(kDeviceStateSpeaking);
+                }
                 auto text = cJSON_GetObjectItem(root, "text");
                 if (cJSON_IsString(text)) {
                     std::vector<TextGlyph> glyphs;
@@ -762,6 +838,7 @@ void Application::InitializeProtocol() {
                 }
             }
         } else if (strcmp(type->valuestring, "stt") == 0) {
+            aborted_ = false;
             auto text = cJSON_GetObjectItem(root, "text");
             if (cJSON_IsString(text)) {
                 std::vector<TextGlyph> glyphs;
@@ -1140,16 +1217,13 @@ void Application::HandleStateChangedEvent() {
             display->SetChatMessage("system", "");
             break;
         case kDeviceStateListening:
+            aborted_ = false;
             display->SetStatus(Lang::Strings::LISTENING);
             display->SetEmotion("neutral");
 
-            // Make sure the audio processor is running
+            // Defer mic until robot finishes speaking (TTS playback drained).
             if (play_popup_on_listening_ || !audio_service_.IsAudioProcessorRunning()) {
-                // For auto mode, wait for the playback queue to drain before enabling
-                // voice processing. This prevents audio truncation when STOP arrives
-                // late due to network jitter. Instead of blocking the main loop here,
-                // defer the start until MAIN_EVENT_PLAYBACK_DRAINED arrives.
-                if (listening_mode_ == kListeningModeAutoStop && !audio_service_.IsPlaybackIdle()) {
+                if (!audio_service_.IsPlaybackIdle()) {
                     pending_listening_start_ = true;
                 } else {
                     StartListeningAudio();
@@ -1161,6 +1235,9 @@ void Application::HandleStateChangedEvent() {
         case kDeviceStateSpeaking:
             display->SetStatus(Lang::Strings::SPEAKING);
             speaking_playback_idle_since_us_ = 0;
+            if (speaking_started_us_ == 0) {
+                speaking_started_us_ = esp_timer_get_time();
+            }
 
             if (listening_mode_ != kListeningModeRealtime) {
                 audio_service_.EnableVoiceProcessing(false);
@@ -1179,10 +1256,31 @@ void Application::HandleStateChangedEvent() {
     }
 }
 
+void Application::FinishSpeakingAfterTts() {
+    speaking_awaiting_audio_ = false;
+    speaking_started_us_ = 0;
+    speaking_playback_idle_since_us_ = 0;
+    tts_stop_received_ = false;
+    speaking_finish_deadline_us_ = 0;
+    pending_listening_start_ = false;
+
+    if (listening_mode_ == kListeningModeManualStop) {
+        SetDeviceState(kDeviceStateIdle);
+        return;
+    }
+    SetDeviceState(kDeviceStateListening);
+    ScheduleListeningResyncAfterRobotAction();
+}
+
 void Application::StartListeningAudio() {
     // Runs in the main loop, either directly from HandleStateChangedEvent or
     // deferred via MAIN_EVENT_PLAYBACK_DRAINED once the playback queue drains.
     if (GetDeviceState() != kDeviceStateListening) {
+        return;
+    }
+
+    if (!audio_service_.IsPlaybackIdle()) {
+        pending_listening_start_ = true;
         return;
     }
 

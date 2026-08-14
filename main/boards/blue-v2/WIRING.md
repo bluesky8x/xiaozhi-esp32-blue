@@ -183,7 +183,7 @@ Bật trong `config.h`:
 
 #### An toàn khi đi thẳng (`tof_motor_guard`)
 
-1. Calibrate trên **sàn trống phía trước** (~400 mm): `self.tof.calibrate` / `tof:cal:400`
+1. Calibrate trên **sàn trống**: `self.tof.calibrate` (auto, `distance_mm=0`) / `tof:cal` — robot lưu median thực tế
 2. Khi đã cal, dừng nếu lệch so với `cal_ref`:
 
 | Case | Điều kiện |
@@ -192,7 +192,7 @@ Bật trong `config.h`:
 | Hố / mép bàn | dist > cal×125% hoặc > cal+50 mm |
 | Hố sâu (sensor sau) | floor > 120 mm — cần sensor #2 |
 
-Chưa calibrate → fallback: obstacle ≤ 120 mm, void ≥ 450 mm.
+Chưa calibrate → fallback: obstacle ≤ 96 mm, void ≥ 200 mm (mặc định cal ~128 mm).
 
 ### 7. WS2812 RGB — đèn trạng thái
 
