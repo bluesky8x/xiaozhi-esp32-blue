@@ -1164,8 +1164,9 @@ void Application::HandleStateChangedEvent() {
 
             if (listening_mode_ != kListeningModeRealtime) {
                 audio_service_.EnableVoiceProcessing(false);
-                // Only AFE wake word can be detected in speaking mode
-                audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());
+                // Drop AFE wake word during TTS (saves CPU). Keep RX clock on duplex boards —
+                // disabling RX while TX plays hangs I2S (WDT). WebSocket stays open.
+                audio_service_.EnableWakeWordDetection(false);
             }
             break;
         case kDeviceStateWifiConfiguring:

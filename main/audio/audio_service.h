@@ -125,6 +125,8 @@ public:
 
     void EnableWakeWordDetection(bool enable);
     void EnableVoiceProcessing(bool enable);
+    /** Ask the input task to disable the mic when no capture is active (e.g. during TTS). */
+    void ReleaseMicInput();
     void EnableAudioTesting(bool enable);
     void EnableDeviceAec(bool enable);
 

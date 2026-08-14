@@ -661,6 +661,14 @@ void AudioService::EnableWakeWordDetection(bool enable) {
     }
 }
 
+void AudioService::ReleaseMicInput() {
+    // Duplex INMP441+MAX98357: disabling RX while TX plays can hang I2S → WDT reset.
+    if (codec_ != nullptr && codec_->duplex()) {
+        return;
+    }
+    xEventGroupSetBits(event_group_, AS_EVENT_AUDIO_INPUT_STOP_REQUEST);
+}
+
 void AudioService::EnableVoiceProcessing(bool enable) {
     ESP_LOGD(TAG, "%s voice processing", enable ? "Enabling" : "Disabling");
 

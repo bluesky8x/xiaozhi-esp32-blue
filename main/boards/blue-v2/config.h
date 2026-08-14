@@ -95,6 +95,8 @@
 #define MOTOR_RIGHT_IN1  GPIO_NUM_12
 #define MOTOR_RIGHT_IN2  GPIO_NUM_11
 #define MOTOR_AUTO_STOP_MS 5000
+// Embedded dance.ogg length (~23.5 s) — keep server mv:d cooldown in sync.
+#define MOTOR_DANCE_DURATION_MS 23500
 // Active brake (IN1=IN2=HIGH) before coast on stop — FS_MX1508 motorBrake() pattern, reduces mechanical jitter.
 #define MOTOR_BRAKE_ENABLE 1
 #define MOTOR_BRAKE_MS     50
@@ -128,6 +130,13 @@
 #define TOF_CAL_FAR_MARGIN_MM     50    // also dist > cal + 50 mm
 #define TOF_CAL_APPROACH_STEP_MM  20    // closing fast: dist dropped this much in one poll
 #define TOF_CAL_JUMP_MARGIN_MM    80    // sudden extra deviation from cal in one step
+
+// Fallback cliff: jump from nearest reading this move leg (mm).
+#define TOF_CLIFF_JUMP_MM         150
+#define TOF_CLIFF_NEAR_MAX_MM     280   // jump/lost-signal cliff only if was this close first
+
+// Ignore guard for this long after motor start (I2C/vibration settle); cliff still checked.
+#define TOF_MOVE_GRACE_MS         150
 
 // Fallback fixed thresholds when NOT calibrated yet:
 #define TOF_OBSTACLE_STOP_MM      120

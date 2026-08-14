@@ -18,10 +18,6 @@ bool SampleUsable(const vl53l0x_data_t& sample) {
     return sample.valid && sample.distance_mm > 0 && sample.distance_mm <= TOF_MAX_VALID_MM;
 }
 
-int AbsDelta(int a, int b) {
-    return a >= b ? a - b : b - a;
-}
-
 int NearLimit(int cal_mm) {
     const int pct = cal_mm * (100 - TOF_CAL_NEAR_MARGIN_PCT) / 100;
     const int abs = cal_mm - TOF_CAL_NEAR_MARGIN_MM;
@@ -34,6 +30,30 @@ int FarLimit(int cal_mm) {
     return pct < abs ? pct : abs;
 }
 
+TofSafetyStopReason CheckFrontCliffInvalid(const vl53l0x_data_t& sample, int far_limit_mm,
+                                           int near_limit_mm) {
+#if !TOF_CLIFF_GUARD_ENABLE
+    (void)sample;
+    (void)far_limit_mm;
+    (void)near_limit_mm;
+    return TofSafetyStopReason::None;
+#else
+    if (sample.distance_mm > 0 && sample.distance_mm < static_cast<uint16_t>(near_limit_mm)) {
+        return TofSafetyStopReason::None;
+    }
+    if (sample.valid && sample.distance_mm >= TOF_MAX_VALID_MM) {
+        return TofSafetyStopReason::CliffFar;
+    }
+    if (!sample.valid || sample.distance_mm == 0) {
+        return TofSafetyStopReason::CliffLostSignal;
+    }
+    if (static_cast<int>(sample.distance_mm) > far_limit_mm) {
+        return TofSafetyStopReason::CliffFar;
+    }
+    return TofSafetyStopReason::None;
+#endif
+}
+
 TofSafetyStopReason CheckFrontCalibrated(const vl53l0x_data_t& sample, int cal_mm) {
 #if !TOF_OBSTACLE_GUARD_ENABLE && !TOF_CLIFF_GUARD_ENABLE
     (void)sample;
@@ -42,6 +62,7 @@ TofSafetyStopReason CheckFrontCalibrated(const vl53l0x_data_t& sample, int cal_m
 #endif
 
     const int near_limit = NearLimit(cal_mm);
+    const int far_limit = FarLimit(cal_mm);
 
     if (SampleUsable(sample)) {
         const int dist = static_cast<int>(sample.distance_mm);
@@ -51,7 +72,7 @@ TofSafetyStopReason CheckFrontCalibrated(const vl53l0x_data_t& sample, int cal_m
         }
 #endif
 #if TOF_CLIFF_GUARD_ENABLE
-        if (dist > FarLimit(cal_mm)) {
+        if (dist > far_limit) {
             return TofSafetyStopReason::CliffFar;
         }
 #endif
@@ -65,11 +86,10 @@ TofSafetyStopReason CheckFrontCalibrated(const vl53l0x_data_t& sample, int cal_m
 #endif
 
 #if TOF_CLIFF_GUARD_ENABLE
-    if (sample.valid && sample.distance_mm >= TOF_MAX_VALID_MM) {
-        return TofSafetyStopReason::CliffFar;
-    }
-#endif
+    return CheckFrontCliffInvalid(sample, far_limit, near_limit);
+#else
     return TofSafetyStopReason::None;
+#endif
 }
 
 TofSafetyStopReason CheckFrontFallback(const vl53l0x_data_t& sample) {
@@ -93,11 +113,10 @@ TofSafetyStopReason CheckFrontFallback(const vl53l0x_data_t& sample) {
     }
 
 #if TOF_CLIFF_GUARD_ENABLE
-    if (sample.valid && sample.distance_mm >= TOF_MAX_VALID_MM) {
-        return TofSafetyStopReason::CliffFar;
-    }
-#endif
+    return CheckFrontCliffInvalid(sample, TOF_CLIFF_VOID_MM, TOF_OBSTACLE_STOP_MM);
+#else
     return TofSafetyStopReason::None;
+#endif
 }
 
 TofSafetyStopReason CheckRear(const vl53l0x_data_t& sample) {

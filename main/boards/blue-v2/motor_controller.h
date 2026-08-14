@@ -63,6 +63,9 @@ public:
     /** Enqueue stop — clears pending moves. Returns false if queue full. */
     bool EnqueueStop();
 
+    /** Enqueue a fixed wiggle/spin dance routine (~8 s). Clears pending moves. */
+    bool EnqueueDance();
+
     bool IsMoving() const { return moving_.load(std::memory_order_acquire); }
 
     bool IsMovingForward() const {
@@ -80,7 +83,7 @@ public:
     static bool ShouldPauseUplink();
 
 private:
-    enum class CmdType : uint8_t { kStop, kMove };
+    enum class CmdType : uint8_t { kStop, kMove, kDance };
 
     struct MotorCommand {
         CmdType type;
@@ -125,6 +128,8 @@ private:
     void BrakeSide(gpio_num_t in1, gpio_num_t in2);
     void DriveSide(gpio_num_t in1, gpio_num_t in2, int speed);
     void ScheduleAutoStop(int duration_ms);
+    void DriveForMs(int left_speed, int right_speed, int duration_ms);
+    void RunDanceRoutine();
     void RegisterMcpTools();
 };
 

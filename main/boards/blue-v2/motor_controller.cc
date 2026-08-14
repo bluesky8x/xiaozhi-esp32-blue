@@ -6,6 +6,10 @@
 #include "tof_controller.h"
 #include "tof_safety_check.h"
 
+#if CONFIG_BOARD_TYPE_BLUE_V2
+#include "assets/lang_config.h"
+#endif
+
 #include <algorithm>
 #include <esp_timer.h>
 
@@ -82,6 +86,14 @@ void MotorController::WorkerLoop() {
         }
         if (cmd.type == CmdType::kStop) {
             ExecuteStop();
+        } else if (cmd.type == CmdType::kDance) {
+            TofSafetyStopReason reason = TofSafetyStopReason::None;
+            if (!TofPreMoveCheck(-70, 70, &reason)) {
+                ESP_LOGW(MOTOR_TAG, "Dance skipped — pre-move ToF (%s)",
+                         TofSafetyStopReasonName(reason));
+                continue;
+            }
+            RunDanceRoutine();
         } else {
             // First move in queue (motors idle): fresh ToF check before GPIO drive.
             if (!IsMoving()) {
@@ -140,6 +152,16 @@ bool MotorController::EnqueueMove(int left_speed, int right_speed, int duration_
 bool MotorController::EnqueueStop() {
     MotorCommand cmd = {
         .type = CmdType::kStop,
+        .left = 0,
+        .right = 0,
+        .duration_ms = 0,
+    };
+    return PushCommand(cmd, true);
+}
+
+bool MotorController::EnqueueDance() {
+    MotorCommand cmd = {
+        .type = CmdType::kDance,
         .left = 0,
         .right = 0,
         .duration_ms = 0,
@@ -232,6 +254,74 @@ void MotorController::ScheduleAutoStop(int duration_ms) {
     }
     esp_timer_stop(stop_timer_);
     esp_timer_start_once(stop_timer_, static_cast<uint64_t>(duration_ms) * 1000);
+}
+
+void MotorController::DriveForMs(int left_speed, int right_speed, int duration_ms) {
+    left_speed = std::clamp(left_speed, -100, 100);
+    right_speed = std::clamp(right_speed, -100, 100);
+    duration_ms = std::clamp(duration_ms, 0, 10000);
+    ExecuteMove(left_speed, right_speed, 0);
+    if (duration_ms > 0) {
+        vTaskDelay(pdMS_TO_TICKS(duration_ms));
+    }
+    ExecuteStop();
+}
+
+namespace {
+
+#if CONFIG_BOARD_TYPE_BLUE_V2
+void StartDanceMusic() {
+    Application::GetInstance().Schedule([]() {
+        Application::GetInstance().PlaySound(Lang::Sounds::OGG_DANCE);
+    });
+}
+#endif
+
+}  // namespace
+
+void MotorController::RunDanceRoutine() {
+    struct Step {
+        int8_t left;
+        int8_t right;
+        int16_t duration_ms;
+        int16_t pause_ms;
+    };
+
+    // ~23 s routine synced to assets/common/dance.ogg (slap-house instrumental).
+    // Each step: DriveForMs + pause_ms (+ ~50 ms motor brake inside DriveForMs).
+    static constexpr Step kRoutine[] = {
+        // Intro — sway L/R on beat (~5 s)
+        {-72, 72, 380, 120}, {72, -72, 380, 120}, {-72, 72, 380, 120}, {72, -72, 380, 120},
+        {-72, 72, 380, 120}, {72, -72, 380, 120}, {-72, 72, 380, 120}, {72, -72, 380, 120},
+        {-72, 72, 380, 120}, {72, -72, 380, 120},
+        // Groove — forward / back bob (~5 s)
+        {68, 68, 420, 80}, {-68, -68, 420, 80}, {68, 68, 420, 80}, {-68, -68, 420, 80},
+        {68, 68, 420, 80}, {-68, -68, 420, 80}, {68, 68, 420, 80}, {-68, -68, 420, 80},
+        {68, 68, 420, 80}, {-68, -68, 420, 80},
+        // Build — faster wiggle (~4.2 s)
+        {-78, 78, 280, 70}, {78, -78, 280, 70}, {-78, 78, 280, 70}, {78, -78, 280, 70},
+        {-78, 78, 280, 70}, {78, -78, 280, 70},
+        // Drop — spin bursts (~5 s)
+        {-85, 85, 850, 150}, {-85, 85, 850, 150}, {-85, 85, 850, 150}, {-85, 85, 850, 150},
+        {-85, 85, 850, 150},
+        // Finale — pulse forward + last spin (~3.8 s)
+        {75, 75, 350, 100}, {75, 75, 350, 100}, {75, 75, 350, 100}, {75, 75, 350, 100},
+        {-90, 90, 1200, 0},
+    };
+
+#if CONFIG_BOARD_TYPE_BLUE_V2
+    StartDanceMusic();
+#endif
+
+    ESP_LOGI(MOTOR_TAG, "Dance start (%u steps, ~23 s + dance.ogg)",
+             static_cast<unsigned>(sizeof(kRoutine) / sizeof(kRoutine[0])));
+    for (const Step& step : kRoutine) {
+        DriveForMs(step.left, step.right, step.duration_ms);
+        if (step.pause_ms > 0) {
+            vTaskDelay(pdMS_TO_TICKS(step.pause_ms));
+        }
+    }
+    ESP_LOGI(MOTOR_TAG, "Dance done");
 }
 
 void MotorController::ExecuteMove(int left_speed, int right_speed, int duration_ms) {
@@ -339,6 +429,12 @@ void MotorController::RegisterMcpTools() {
             return EnqueueMove(-100, 100, duration_ms);
         });
 
+    mcp_server.AddTool(
+        "self.motor.dance",
+        "Dance ~23 s with embedded slap-house music (wiggle, bob, spin). Use for: nhảy, múa, dance.",
+        PropertyList(),
+        [this](const PropertyList&) -> ReturnValue { return EnqueueDance(); });
+
     mcp_server.AddTool("self.chassis.go_forward", "Move forward", PropertyList(),
                        [this](const PropertyList&) -> ReturnValue {
                            return EnqueueMove(100, 100, MOTOR_AUTO_STOP_MS);
@@ -358,4 +454,7 @@ void MotorController::RegisterMcpTools() {
                        [this](const PropertyList&) -> ReturnValue {
                            return EnqueueMove(100, -100, MOTOR_AUTO_STOP_MS);
                        });
+
+    mcp_server.AddTool("self.chassis.dance", "Dance routine (wiggle + spin)", PropertyList(),
+                       [this](const PropertyList&) -> ReturnValue { return EnqueueDance(); });
 }

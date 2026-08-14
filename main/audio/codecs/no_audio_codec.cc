@@ -516,12 +516,25 @@ void NoAudioCodec::EnableInput(bool enable) {
     if (enable) {
         // INMP441 + MAX98357 on shared WS/BCLK: ESP32 master must enable TX for clock.
         if (duplex_ && !output_enabled_) {
-            ESP_ERROR_CHECK(i2s_channel_enable(tx_handle_));
+            esp_err_t err = i2s_channel_enable(tx_handle_);
+            if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+                ESP_ERROR_CHECK(err);
+            }
             output_enabled_ = true;
             ESP_LOGI(TAG, "Duplex: enabled TX for shared I2S clock (mic RX)");
         }
-        ESP_ERROR_CHECK(i2s_channel_enable(rx_handle_));
+        esp_err_t err = i2s_channel_enable(rx_handle_);
+        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+            ESP_ERROR_CHECK(err);
+        }
     } else {
+        if (duplex_ && output_enabled_) {
+            // HW RX must stay on for shared BCLK/WS while speaker TX is active.
+            // Do not clear input_enabled_ — otherwise listening re-enables RX and
+            // i2s_channel_enable() aborts with ESP_ERR_INVALID_STATE.
+            ESP_LOGW(TAG, "Skip RX disable while duplex TX active (avoid I2S hang)");
+            return;
+        }
         ESP_ERROR_CHECK(i2s_channel_disable(rx_handle_));
     }
     AudioCodec::EnableInput(enable);
