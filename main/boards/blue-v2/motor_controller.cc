@@ -9,13 +9,10 @@
 #include "tof_safety_check.h"
 
 #if CONFIG_BOARD_TYPE_BLUE_V2
-#include "assets/lang_config.h"
 #include "motor_dance.h"
 #endif
 
 #include <algorithm>
-#include <esp_timer.h>
-#include <string_view>
 
 MotorController* MotorController::instance_ = nullptr;
 
@@ -98,7 +95,7 @@ void MotorController::WorkerLoop() {
                          TofSafetyStopReasonName(reason));
                 continue;
             }
-            RunDanceRoutine(cmd.dance_track, !cmd.dance_live, cmd.dance_mood_mask,
+            RunDanceRoutine(cmd.dance_track, cmd.dance_mood_mask,
                             static_cast<MotorDance::MusicState>(cmd.dance_mood_primary),
                             cmd.dance_timeline, cmd.dance_segment_ms);
         } else {
@@ -166,7 +163,7 @@ bool MotorController::EnqueueStop() {
     return PushCommand(cmd, true);
 }
 
-bool MotorController::EnqueueDance(int track, bool live, const char* mood, const char* states,
+bool MotorController::EnqueueDance(int track, const char* mood, const char* states,
                                    const char* timeline, int segment_ms) {
     uint8_t normalized = 1;
     if (track == 3) {
@@ -183,7 +180,6 @@ bool MotorController::EnqueueDance(int track, bool live, const char* mood, const
         .right = 0,
         .duration_ms = 0,
         .dance_track = normalized,
-        .dance_live = live,
         .dance_mood_mask = mask,
         .dance_mood_primary = static_cast<uint8_t>(primary),
         .dance_segment_ms = static_cast<uint16_t>(segment_ms > 0 ? segment_ms : 6000),
@@ -371,26 +367,8 @@ bool MotorController::DriveForMsWithCancel(int left_speed, int right_speed, int 
     return !cancel.load(std::memory_order_acquire);
 }
 
-namespace {
 
-#if CONFIG_BOARD_TYPE_BLUE_V2
-void StartDanceMusic(uint8_t track) {
-    std::string_view sound = Lang::Sounds::OGG_DANCE1;
-    if (track == 3) {
-        sound = Lang::Sounds::OGG_DANCE3;
-    } else if (track == 2) {
-        sound = Lang::Sounds::OGG_DANCE2;
-    }
-    Application::GetInstance().Schedule([sound]() {
-        Application::GetInstance().PlaySound(sound);
-    });
-}
-#endif
-
-}  // namespace
-
-void MotorController::RunDanceRoutine(uint8_t track, bool embed_music,
-                                      MotorDance::MusicStateMask mood_mask,
+void MotorController::RunDanceRoutine(uint8_t track, MotorDance::MusicStateMask mood_mask,
                                       MotorDance::MusicState primary, const char* timeline,
                                       uint16_t segment_ms) {
     uint8_t normalized = 1;
@@ -413,16 +391,13 @@ void MotorController::RunDanceRoutine(uint8_t track, bool embed_music,
     }
 
 #if CONFIG_BOARD_TYPE_BLUE_V2
-    if (embed_music) {
-        StartDanceMusic(normalized);
-    }
     MotorDance::DanceTimeline parsed_timeline{};
     const MotorDance::DanceTimeline* timeline_ptr = nullptr;
     if (MotorDance::ParseDanceTimeline(timeline, segment_ms, &parsed_timeline)) {
         timeline_ptr = &parsed_timeline;
     }
-    ESP_LOGI(MOTOR_TAG, "Dance track %u start (embed=%d mood=%u timeline=%d x %ums)",
-             static_cast<unsigned>(normalized), embed_music ? 1 : 0,
+    ESP_LOGI(MOTOR_TAG, "Live dance track %u (server stream, mood=%u timeline=%d x %ums)",
+             static_cast<unsigned>(normalized),
              static_cast<unsigned>(primary),
              timeline_ptr != nullptr ? timeline_ptr->len : 0,
              timeline_ptr != nullptr ? timeline_ptr->segment_ms : segment_ms);
@@ -563,24 +538,21 @@ void MotorController::RegisterMcpTools() {
 
     mcp_server.AddTool(
         "self.motor.dance",
-        "Dance with music-synced moves. track=1..3; live=true streams from server. "
+        "Live dance with music synced from server stream. track=1..3 for style hint. "
         "mood/states: EQ summary. timeline: compact chars c/g/v/D/f per segment. "
-        "segment_ms: 4000-8000 (EQ segment length).",
+        "segment_ms: 4000-8000 (EQ segment length). Robot does not play embedded dance music.",
         PropertyList({Property("track", kPropertyTypeInteger, 1, 1, 3),
-                      Property("live", kPropertyTypeBoolean, false),
                       Property("mood", kPropertyTypeString, "groove"),
                       Property("states", kPropertyTypeString, ""),
                       Property("timeline", kPropertyTypeString, ""),
                       Property("segment_ms", kPropertyTypeInteger, 6000, 4000, 8000)}),
         [this](const PropertyList& properties) -> ReturnValue {
             const int track = properties["track"].value<int>();
-            const bool live = properties["live"].value<bool>();
             const std::string mood = properties["mood"].value<std::string>();
             const std::string states = properties["states"].value<std::string>();
             const std::string timeline = properties["timeline"].value<std::string>();
             const int segment_ms = properties["segment_ms"].value<int>();
-            return EnqueueDance(track, live, mood.c_str(), states.c_str(), timeline.c_str(),
-                              segment_ms);
+            return EnqueueDance(track, mood.c_str(), states.c_str(), timeline.c_str(), segment_ms);
         });
 
     mcp_server.AddTool("self.chassis.go_forward", "Move forward", PropertyList(),
@@ -603,6 +575,8 @@ void MotorController::RegisterMcpTools() {
                            return EnqueueMove(-100, 100, MOTOR_AUTO_STOP_MS);
                        });
 
-    mcp_server.AddTool("self.chassis.dance", "Dance routine track 1 (wiggle + spin)", PropertyList(),
+    mcp_server.AddTool("self.chassis.dance",
+                       "Live dance track 1 (server streams music, robot syncs moves)",
+                       PropertyList(),
                        [this](const PropertyList&) -> ReturnValue { return EnqueueDance(1); });
 }
