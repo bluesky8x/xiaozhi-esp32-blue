@@ -1,5 +1,7 @@
 #include "motor_controller.h"
 
+#include <cstring>
+
 #include "application.h"
 #include "config.h"
 #include "mcp_server.h"
@@ -96,7 +98,9 @@ void MotorController::WorkerLoop() {
                          TofSafetyStopReasonName(reason));
                 continue;
             }
-            RunDanceRoutine(cmd.dance_track);
+            RunDanceRoutine(cmd.dance_track, !cmd.dance_live, cmd.dance_mood_mask,
+                            static_cast<MotorDance::MusicState>(cmd.dance_mood_primary),
+                            cmd.dance_timeline, cmd.dance_segment_ms);
         } else {
             // First move in queue (motors idle): fresh ToF check before GPIO drive.
             if (!IsMoving()) {
@@ -162,20 +166,32 @@ bool MotorController::EnqueueStop() {
     return PushCommand(cmd, true);
 }
 
-bool MotorController::EnqueueDance(int track) {
+bool MotorController::EnqueueDance(int track, bool live, const char* mood, const char* states,
+                                   const char* timeline, int segment_ms) {
     uint8_t normalized = 1;
     if (track == 3) {
         normalized = 3;
     } else if (track == 2) {
         normalized = 2;
     }
+    const MotorDance::MusicState primary = MotorDance::ParseMusicState(mood);
+    const MotorDance::MusicStateMask mask =
+        MotorDance::ParseMusicStateMask(states, primary);
     MotorCommand cmd = {
         .type = CmdType::kDance,
         .left = 0,
         .right = 0,
         .duration_ms = 0,
         .dance_track = normalized,
+        .dance_live = live,
+        .dance_mood_mask = mask,
+        .dance_mood_primary = static_cast<uint8_t>(primary),
+        .dance_segment_ms = static_cast<uint16_t>(segment_ms > 0 ? segment_ms : 6000),
     };
+    if (timeline != nullptr && timeline[0] != '\0') {
+        std::strncpy(cmd.dance_timeline, timeline, sizeof(cmd.dance_timeline) - 1);
+        cmd.dance_timeline[sizeof(cmd.dance_timeline) - 1] = '\0';
+    }
     return PushCommand(cmd, true);
 }
 
@@ -191,6 +207,7 @@ void MotorController::RequestDanceStop() {
         app.AbortSpeaking(kAbortReasonNone);
     }
     app.GetAudioService().ResetDecoder();
+    app.Schedule([&]() { app.EndDanceSession(); });
 #endif
 }
 
@@ -372,7 +389,10 @@ void StartDanceMusic(uint8_t track) {
 
 }  // namespace
 
-void MotorController::RunDanceRoutine(uint8_t track) {
+void MotorController::RunDanceRoutine(uint8_t track, bool embed_music,
+                                      MotorDance::MusicStateMask mood_mask,
+                                      MotorDance::MusicState primary, const char* timeline,
+                                      uint16_t segment_ms) {
     uint8_t normalized = 1;
     if (track == 3) {
         normalized = 3;
@@ -382,22 +402,47 @@ void MotorController::RunDanceRoutine(uint8_t track) {
     dance_cancel_.store(false, std::memory_order_release);
     dancing_.store(true, std::memory_order_release);
 
-#if CONFIG_BOARD_TYPE_BLUE_V2
-    StartDanceMusic(normalized);
-    ESP_LOGI(MOTOR_TAG, "Dance track %u start", static_cast<unsigned>(normalized));
-    if (normalized == 3) {
-        MotorDance::RunTrack3(*this, dance_cancel_);
-    } else if (normalized == 2) {
-        MotorDance::RunTrack2(*this, dance_cancel_);
-    } else {
-        MotorDance::RunTrack1(*this, dance_cancel_);
+    auto& app = Application::GetInstance();
+    std::atomic<bool> session_started{false};
+    app.Schedule([&]() {
+        app.BeginDanceSession();
+        session_started.store(true, std::memory_order_release);
+    });
+    for (int i = 0; i < 100 && !session_started.load(std::memory_order_acquire); ++i) {
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
+
+#if CONFIG_BOARD_TYPE_BLUE_V2
+    if (embed_music) {
+        StartDanceMusic(normalized);
+    }
+    MotorDance::DanceTimeline parsed_timeline{};
+    const MotorDance::DanceTimeline* timeline_ptr = nullptr;
+    if (MotorDance::ParseDanceTimeline(timeline, segment_ms, &parsed_timeline)) {
+        timeline_ptr = &parsed_timeline;
+    }
+    ESP_LOGI(MOTOR_TAG, "Dance track %u start (embed=%d mood=%u timeline=%d x %ums)",
+             static_cast<unsigned>(normalized), embed_music ? 1 : 0,
+             static_cast<unsigned>(primary),
+             timeline_ptr != nullptr ? timeline_ptr->len : 0,
+             timeline_ptr != nullptr ? timeline_ptr->segment_ms : segment_ms);
+    MotorDance::RunDanceSession(
+        *this, dance_cancel_,
+        [&app]() {
+            return app.IsDanceSessionActive() && !app.GetAudioService().IsPlaybackIdle();
+        },
+        mood_mask, primary, timeline_ptr);
 #else
     ESP_LOGW(MOTOR_TAG, "Dance track %u skipped — no choreography on this board",
              static_cast<unsigned>(normalized));
 #endif
 
     ExecuteStop();
+    app.Schedule([&]() { app.EndDanceSession(); });
+    for (int i = 0; i < 100 && app.IsDanceSessionActive(); ++i) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
     const bool cancelled = dance_cancel_.load(std::memory_order_acquire);
     dancing_.store(false, std::memory_order_release);
     dance_cancel_.store(false, std::memory_order_release);
@@ -428,6 +473,9 @@ void MotorController::ExecuteMove(int left_speed, int right_speed, int duration_
 
 void MotorController::NotifyStoppedOnMain() {
 #if CONFIG_BOARD_TYPE_BLUE_V2
+    if (dancing_.load(std::memory_order_acquire)) {
+        return;
+    }
     Application::GetInstance().ScheduleListeningResyncAfterMotorStop();
 #endif
 }
@@ -515,12 +563,24 @@ void MotorController::RegisterMcpTools() {
 
     mcp_server.AddTool(
         "self.motor.dance",
-        "Dance with embedded music. track=1 slap-house ~23 s; track=2 hip-hop ~99 s; track=3 drill ~25 s. "
-        "Use for: nhảy, múa, dance, dance 1/2/3.",
-        PropertyList({Property("track", kPropertyTypeInteger, 1, 1, 3)}),
+        "Dance with music-synced moves. track=1..3; live=true streams from server. "
+        "mood/states: EQ summary. timeline: compact chars c/g/v/D/f per segment. "
+        "segment_ms: 4000-8000 (EQ segment length).",
+        PropertyList({Property("track", kPropertyTypeInteger, 1, 1, 3),
+                      Property("live", kPropertyTypeBoolean, false),
+                      Property("mood", kPropertyTypeString, "groove"),
+                      Property("states", kPropertyTypeString, ""),
+                      Property("timeline", kPropertyTypeString, ""),
+                      Property("segment_ms", kPropertyTypeInteger, 6000, 4000, 8000)}),
         [this](const PropertyList& properties) -> ReturnValue {
             const int track = properties["track"].value<int>();
-            return EnqueueDance(track);
+            const bool live = properties["live"].value<bool>();
+            const std::string mood = properties["mood"].value<std::string>();
+            const std::string states = properties["states"].value<std::string>();
+            const std::string timeline = properties["timeline"].value<std::string>();
+            const int segment_ms = properties["segment_ms"].value<int>();
+            return EnqueueDance(track, live, mood.c_str(), states.c_str(), timeline.c_str(),
+                              segment_ms);
         });
 
     mcp_server.AddTool("self.chassis.go_forward", "Move forward", PropertyList(),

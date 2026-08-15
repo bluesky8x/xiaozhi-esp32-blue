@@ -2,6 +2,7 @@
 #define __MOTOR_CONTROLLER_H__
 
 #include "config.h"
+#include "motor_dance.h"
 
 #include <atomic>
 #include <driver/gpio.h>
@@ -64,7 +65,9 @@ public:
     bool EnqueueStop();
 
     /** Enqueue dance routine (track 1 slap-house ~23 s, track 2 hip-hop ~99 s, track 3 drill ~25 s). */
-    bool EnqueueDance(int track = 1);
+    bool EnqueueDance(int track = 1, bool live = false, const char* mood = nullptr,
+                      const char* states = nullptr, const char* timeline = nullptr,
+                      int segment_ms = 6000);
 
     bool IsMoving() const { return moving_.load(std::memory_order_acquire); }
 
@@ -102,6 +105,11 @@ private:
         int8_t right;
         int16_t duration_ms;
         uint8_t dance_track = 1;
+        bool dance_live = false;
+        uint8_t dance_mood_mask = 0;
+        uint8_t dance_mood_primary = 1;
+        uint16_t dance_segment_ms = 6000;
+        char dance_timeline[MotorDance::DanceTimeline::kMaxLen + 1] = {};
     };
 
     gpio_num_t left_in1_;
@@ -143,7 +151,10 @@ private:
     void DriveSide(gpio_num_t in1, gpio_num_t in2, int speed);
     void ScheduleAutoStop(int duration_ms);
     void DriveForMs(int left_speed, int right_speed, int duration_ms);
-    void RunDanceRoutine(uint8_t track);
+    void RunDanceRoutine(uint8_t track, bool embed_music = true,
+                         MotorDance::MusicStateMask mood_mask = 0,
+                         MotorDance::MusicState primary = MotorDance::MusicState::Groove,
+                         const char* timeline = nullptr, uint16_t segment_ms = 6000);
     void RegisterMcpTools();
 };
 

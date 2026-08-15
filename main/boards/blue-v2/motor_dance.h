@@ -2,19 +2,60 @@
 #define BLUE_V2_MOTOR_DANCE_H_
 
 #include <atomic>
+#include <cstdint>
+#include <functional>
 
 class MotorController;
 
 namespace MotorDance {
 
-/** Slap-house routine (~22 s) for dance1.ogg */
-void RunTrack1(MotorController& motor, std::atomic<bool>& cancel);
+enum class ActionId : uint8_t {
+    Sway = 0,
+    Surge,
+    SpinBurst,
+    Glide,
+    AltTurn,
+    ForwardPulse,
+    Count,
+};
 
-/** Hip-hop routine (~99 s) for dance2.ogg */
-void RunTrack2(MotorController& motor, std::atomic<bool>& cancel);
+enum class MusicState : uint8_t {
+    Chill = 0,
+    Groove,
+    Drive,
+    Drop,
+    Flow,
+    Count,
+};
 
-/** Orchestral drill routine (~25 s) for dance3.ogg */
-void RunTrack3(MotorController& motor, std::atomic<bool>& cancel);
+using MusicActiveFn = std::function<bool()>;
+using MusicStateMask = uint8_t;
+
+/** Compact EQ timeline: one char per segment (c/g/v/D/f), max 64 segments. */
+struct DanceTimeline {
+    static constexpr int kMaxLen = 64;
+    char chars[kMaxLen + 1] = {};
+    int len = 0;
+    uint16_t segment_ms = 6000;
+};
+
+MusicState ParseMusicState(const char* name);
+MusicState ParseTimelineChar(char ch);
+MusicStateMask ParseMusicStateMask(const char* csv, MusicState primary);
+MusicStateMask MaskForPrimary(MusicState primary);
+
+bool ParseDanceTimeline(const char* compact, uint16_t segment_ms, DanceTimeline* out);
+void SegmentAtElapsed(const DanceTimeline& timeline, int64_t elapsed_ms, MusicState* primary,
+                      MusicStateMask* mask);
+
+ActionId PickRandomAction(ActionId previous);
+ActionId PickActionForMusicState(MusicStateMask mask, MusicState primary, ActionId previous);
+
+bool RunAction(MotorController& motor, std::atomic<bool>& cancel, ActionId id);
+
+void RunDanceSession(MotorController& motor, std::atomic<bool>& cancel, MusicActiveFn music_active,
+                     MusicStateMask mood_mask = 0, MusicState primary = MusicState::Groove,
+                     const DanceTimeline* timeline = nullptr);
 
 }  // namespace MotorDance
 

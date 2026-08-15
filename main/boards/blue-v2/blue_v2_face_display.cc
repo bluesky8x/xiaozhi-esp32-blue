@@ -1,5 +1,6 @@
 #include "blue_v2_face_display.h"
 
+#include "application.h"
 #include "assets/lang_config.h"
 #include "lvgl_theme.h"
 #include "material_symbols.h"
@@ -211,6 +212,9 @@ void BlueV2FaceDisplay::SetTheme(Theme* theme) {
 
 void BlueV2FaceDisplay::SetChatMessage(const char* role, const char* content) {
     (void)role;
+    if (Application::GetInstance().IsDanceSessionActive()) {
+        return;
+    }
     DisplayLockGuard lock(this);
     if (status_label_ == nullptr) {
         return;

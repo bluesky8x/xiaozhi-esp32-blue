@@ -830,9 +830,12 @@ void Application::InitializeProtocol() {
                         glyphs.clear();
                     }
                     ESP_LOGI(TAG, "<< %s", text->valuestring);
-                    Schedule([display, message = std::string(text->valuestring),
+                    Schedule([this, display, message = std::string(text->valuestring),
                               glyphs = std::move(glyphs), bpp]() {
                         display->AddTextGlyphs(glyphs, bpp);
+                        if (dance_session_active_) {
+                            return;
+                        }
                         display->SetChatMessage("assistant", message.c_str());
                     });
                 }
@@ -847,16 +850,29 @@ void Application::InitializeProtocol() {
                     glyphs.clear();
                 }
                 ESP_LOGI(TAG, ">> %s", text->valuestring);
-                Schedule([display, message = std::string(text->valuestring),
+                Schedule([this, display, message = std::string(text->valuestring),
                           glyphs = std::move(glyphs), bpp]() {
                     display->AddTextGlyphs(glyphs, bpp);
+                    // Server tool hint: "% self_motor_dance" — not user speech.
+                    if (message.size() >= 2 && message[0] == '%' && message[1] == ' ') {
+                        if (!dance_session_active_) {
+                            display->ShowNotification(message.c_str() + 2, 2500);
+                        }
+                        return;
+                    }
+                    if (dance_session_active_) {
+                        return;
+                    }
                     display->SetChatMessage("user", message.c_str());
                 });
             }
         } else if (strcmp(type->valuestring, "llm") == 0) {
             auto emotion = cJSON_GetObjectItem(root, "emotion");
             if (cJSON_IsString(emotion)) {
-                Schedule([display, emotion_str = std::string(emotion->valuestring)]() {
+                Schedule([this, display, emotion_str = std::string(emotion->valuestring)]() {
+                    if (dance_session_active_) {
+                        return;
+                    }
                     display->SetEmotion(emotion_str.c_str());
                 });
             }
@@ -1269,7 +1285,9 @@ void Application::FinishSpeakingAfterTts() {
         return;
     }
     SetDeviceState(kDeviceStateListening);
-    ScheduleListeningResyncAfterRobotAction();
+    if (!dance_session_active_) {
+        ScheduleListeningResyncAfterRobotAction();
+    }
 }
 
 void Application::StartListeningAudio() {
@@ -1358,6 +1376,10 @@ void Application::ResyncListeningAfterMotorStop() {
 }
 
 void Application::EnsureListeningAfterRobotAction() {
+    if (dance_session_active_) {
+        ESP_LOGD(TAG, "Listen re-sync skipped: dance session active");
+        return;
+    }
     const auto state = GetDeviceState();
     if (state != kDeviceStateListening) {
         ESP_LOGW(TAG, "Listen re-sync skipped: state=%s",
@@ -1654,6 +1676,110 @@ void Application::SetAecMode(AecMode mode) {
 }
 
 void Application::PlaySound(const std::string_view& sound) { audio_service_.PlaySound(sound); }
+
+void Application::BeginDanceSession() {
+    if (dance_session_active_) {
+        return;
+    }
+    dance_session_active_ = true;
+    dance_mic_was_listening_ = (GetDeviceState() == kDeviceStateListening);
+    if (!dance_mic_was_listening_) {
+        ESP_LOGI(TAG, "Dance session — mic already off (state=%s)",
+                 DeviceStateMachine::GetStateName(GetDeviceState()));
+        return;
+    }
+    pending_listening_start_ = false;
+    if (protocol_ && protocol_->IsAudioChannelOpened()) {
+        protocol_->SendStopListening();
+    }
+    audio_service_.EnableVoiceProcessing(false);
+    ESP_LOGI(TAG, "Dance session — mic off until music ends");
+}
+
+void Application::UpdateDanceMusicStateDisplay(const char* state_label) {
+    if (state_label == nullptr || state_label[0] == '\0') {
+        return;
+    }
+    dance_music_state_label_ = state_label;
+    Schedule([this, label = std::string(state_label)]() {
+        if (!dance_session_active_) {
+            return;
+        }
+        const char* emotion = "happy";
+        if (label == "chill") {
+            emotion = "relaxed";
+        } else if (label == "groove") {
+            emotion = "happy";
+        } else if (label == "drive") {
+            emotion = "excited";
+        } else if (label == "drop") {
+            emotion = "cool";
+        } else if (label == "flow") {
+            emotion = "friendly";
+        }
+
+        auto* display = Board::GetInstance().GetDisplay();
+        if (display == nullptr) {
+            return;
+        }
+        display->SetStatus(label.c_str());
+        display->SetEmotion(emotion);
+    });
+}
+
+void Application::ClearDanceMusicStateDisplay() {
+    Schedule([this]() {
+        auto* display = Board::GetInstance().GetDisplay();
+        if (display == nullptr) {
+            return;
+        }
+        switch (GetDeviceState()) {
+            case kDeviceStateListening:
+                display->SetStatus(Lang::Strings::LISTENING);
+                display->SetEmotion("neutral");
+                break;
+            case kDeviceStateSpeaking:
+                display->SetStatus(Lang::Strings::SPEAKING);
+                display->SetEmotion("happy");
+                break;
+            case kDeviceStateConnecting:
+                display->SetStatus(Lang::Strings::CONNECTING);
+                display->SetEmotion("neutral");
+                break;
+            default:
+                display->SetStatus(Lang::Strings::STANDBY);
+#if BLUE_APP_OTTO_CHAT
+                display->SetEmotion(BLUE_APP_DEFAULT_EMOTION);
+#else
+                display->SetEmotion("neutral");
+#endif
+                break;
+        }
+    });
+}
+
+void Application::EndDanceSession() {
+    if (!dance_session_active_) {
+        return;
+    }
+    dance_session_active_ = false;
+    dance_music_state_label_.clear();
+    ClearDanceMusicStateDisplay();
+    const bool restore = dance_mic_was_listening_;
+    dance_mic_was_listening_ = false;
+    if (!restore || GetDeviceState() != kDeviceStateListening) {
+        ESP_LOGI(TAG, "Dance session ended — mic restore skipped (state=%s)",
+                 DeviceStateMachine::GetStateName(GetDeviceState()));
+        return;
+    }
+    if (!audio_service_.IsPlaybackIdle()) {
+        pending_listening_start_ = true;
+        ESP_LOGI(TAG, "Dance session ended — defer mic until playback idle");
+        return;
+    }
+    StartListeningAudio();
+    ESP_LOGI(TAG, "Dance session ended — mic restored");
+}
 
 void Application::ResetProtocol() {
     Schedule([this]() {

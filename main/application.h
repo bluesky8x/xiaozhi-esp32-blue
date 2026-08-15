@@ -124,6 +124,14 @@ public:
     AecMode GetAecMode() const { return aec_mode_; }
     void PlaySound(const std::string_view& sound);
     AudioService& GetAudioService() { return audio_service_; }
+
+    /** Dance session: mic off until music playback ends (embed or stream). */
+    void BeginDanceSession();
+    void EndDanceSession();
+    bool IsDanceSessionActive() const { return dance_session_active_; }
+    /** Show EQ music state (chill, groove, …) on the LCD; safe from any task. */
+    void UpdateDanceMusicStateDisplay(const char* state_label);
+    void ClearDanceMusicStateDisplay();
     
     /**
      * Reset protocol resources (thread-safe)
@@ -164,6 +172,9 @@ private:
     bool speaking_awaiting_audio_ = false;         // tts start received, no downlink yet
     int64_t speaking_started_us_ = 0;              // For slow tool/LLM before first TTS frame
     bool defer_blue_v2_heavy_init_ = false;  // Defer motor PWM + I2S until activation (SPI flush safe)
+    bool dance_session_active_ = false;
+    bool dance_mic_was_listening_ = false;
+    std::string dance_music_state_label_;
     int clock_ticks_ = 0;
     TaskHandle_t activation_task_handle_ = nullptr;
 
