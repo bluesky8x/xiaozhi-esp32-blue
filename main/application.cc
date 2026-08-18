@@ -1,6 +1,7 @@
 #include "application.h"
 #include "board.h"
 #include "display.h"
+#include "led/single_led.h"
 #include "device_state_machine.h"
 #include "lcd_display.h"
 #include "mcp_server.h"
@@ -1696,6 +1697,38 @@ void Application::BeginDanceSession() {
     ESP_LOGI(TAG, "Dance session — mic off until music ends");
 }
 
+namespace {
+
+void ApplyMusicEqLed(const std::string& label) {
+    auto* led = dynamic_cast<SingleLed*>(Board::GetInstance().GetLed());
+    if (led == nullptr) {
+        return;
+    }
+    // Center color ↔ accent — smooth pulse (1-pixel gradient feel).
+    if (label == "chill") {
+        led->SetManualColorGradient(0, 4, 22, 0, 14, 32, 1400);
+    } else if (label == "groove") {
+        led->SetManualColorGradient(0, 18, 2, 18, 28, 0, 900);
+    } else if (label == "drive") {
+        led->SetManualColorGradient(22, 8, 0, 32, 14, 0, 550);
+    } else if (label == "drop") {
+        led->SetManualColorGradient(18, 0, 24, 32, 0, 12, 380);
+    } else if (label == "flow") {
+        led->SetManualColorGradient(0, 12, 20, 0, 22, 28, 1000);
+    } else {
+        led->SetManualColorGradient(0, 18, 2, 18, 28, 0, 900);
+    }
+}
+
+void ClearMusicEqLed() {
+    auto* led = dynamic_cast<SingleLed*>(Board::GetInstance().GetLed());
+    if (led != nullptr) {
+        led->ClearManualColor();
+    }
+}
+
+}  // namespace
+
 void Application::UpdateDanceMusicStateDisplay(const char* state_label) {
     if (state_label == nullptr || state_label[0] == '\0') {
         return;
@@ -1724,11 +1757,13 @@ void Application::UpdateDanceMusicStateDisplay(const char* state_label) {
         }
         display->SetStatus(label.c_str());
         display->SetEmotion(emotion);
+        ApplyMusicEqLed(label);
     });
 }
 
 void Application::ClearDanceMusicStateDisplay() {
     Schedule([this]() {
+        ClearMusicEqLed();
         auto* display = Board::GetInstance().GetDisplay();
         if (display == nullptr) {
             return;

@@ -30,14 +30,11 @@ SingleLed::SingleLed(gpio_num_t gpio) {
     led_strip_clear(led_strip_);
 
     esp_timer_create_args_t blink_timer_args = {
-        .callback = [](void *arg) {
-            auto led = static_cast<SingleLed*>(arg);
-            led->OnBlinkTimer();
-        },
+        .callback = AnimTimerTrampoline,
         .arg = this,
         .dispatch_method = ESP_TIMER_TASK,
-        .name = "blink_timer",
-        .skip_unhandled_events = false,
+        .name = "led_anim",
+        .skip_unhandled_events = true,
     };
     ESP_ERROR_CHECK(esp_timer_create(&blink_timer_args, &blink_timer_));
 }
@@ -58,13 +55,117 @@ void SingleLed::SetColor(uint8_t r, uint8_t g, uint8_t b) {
     b_ = b;
 }
 
+void SingleLed::AnimTimerTrampoline(void* arg) {
+    static_cast<SingleLed*>(arg)->OnAnimTimer();
+}
+
+void SingleLed::OnAnimTimer() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (anim_mode_ == AnimMode::Gradient) {
+        OnGradientTimer();
+    } else if (anim_mode_ == AnimMode::Blink) {
+        OnBlinkTimer();
+    }
+}
+
+void SingleLed::StopAnimTimerLocked() {
+    esp_timer_stop(blink_timer_);
+    anim_mode_ = AnimMode::None;
+    grad_tick_ = 0;
+}
+
+static uint8_t LerpChannel(uint8_t a, uint8_t b, uint8_t t) {
+    return static_cast<uint8_t>((static_cast<uint16_t>(a) * (255 - t) + static_cast<uint16_t>(b) * t) / 255);
+}
+
+void SingleLed::SetManualColor(uint8_t r, uint8_t g, uint8_t b) {
+    if (led_strip_ == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    manual_control_ = true;
+    StopAnimTimerLocked();
+    r_ = r;
+    g_ = g;
+    b_ = b;
+    led_strip_set_pixel(led_strip_, 0, r_, g_, b_);
+    led_strip_refresh(led_strip_);
+}
+
+void SingleLed::SetManualColorGradient(uint8_t r0, uint8_t g0, uint8_t b0, uint8_t r1, uint8_t g1,
+                                       uint8_t b1, int period_ms) {
+    if (led_strip_ == nullptr) {
+        return;
+    }
+    if (period_ms < 200) {
+        period_ms = 200;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    manual_control_ = true;
+    StopAnimTimerLocked();
+    grad_r0_ = r0;
+    grad_g0_ = g0;
+    grad_b0_ = b0;
+    grad_r1_ = r1;
+    grad_g1_ = g1;
+    grad_b1_ = b1;
+    grad_period_ms_ = period_ms;
+    grad_tick_ = 0;
+    r_ = r0;
+    g_ = g0;
+    b_ = b0;
+    anim_mode_ = AnimMode::Gradient;
+    led_strip_set_pixel(led_strip_, 0, r_, g_, b_);
+    led_strip_refresh(led_strip_);
+    esp_timer_start_periodic(blink_timer_, static_cast<uint64_t>(grad_step_ms_) * 1000);
+}
+
+void SingleLed::OnGradientTimer() {
+    if (led_strip_ == nullptr) {
+        return;
+    }
+    const int ticks_per_period = grad_period_ms_ / grad_step_ms_;
+    if (ticks_per_period < 4) {
+        return;
+    }
+    grad_tick_ = (grad_tick_ + 1) % ticks_per_period;
+    const int half = ticks_per_period / 2;
+    uint8_t mix;
+    if (grad_tick_ < half) {
+        mix = static_cast<uint8_t>(grad_tick_ * 255 / half);
+    } else {
+        mix = static_cast<uint8_t>((ticks_per_period - grad_tick_) * 255 / half);
+    }
+    const uint8_t r = LerpChannel(grad_r0_, grad_r1_, mix);
+    const uint8_t g = LerpChannel(grad_g0_, grad_g1_, mix);
+    const uint8_t b = LerpChannel(grad_b0_, grad_b1_, mix);
+    r_ = r;
+    g_ = g;
+    b_ = b;
+    led_strip_set_pixel(led_strip_, 0, r_, g_, b_);
+    led_strip_refresh(led_strip_);
+}
+
+void SingleLed::ClearManualColor() {
+    if (led_strip_ == nullptr) {
+        manual_control_ = false;
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        manual_control_ = false;
+        StopAnimTimerLocked();
+    }
+    OnStateChanged();
+}
+
 void SingleLed::TurnOn() {
     if (led_strip_ == nullptr) {
         return;
     }
     
     std::lock_guard<std::mutex> lock(mutex_);
-    esp_timer_stop(blink_timer_);
+    StopAnimTimerLocked();
     led_strip_set_pixel(led_strip_, 0, r_, g_, b_);
     led_strip_refresh(led_strip_);
 }
@@ -75,7 +176,7 @@ void SingleLed::TurnOff() {
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
-    esp_timer_stop(blink_timer_);
+    StopAnimTimerLocked();
     led_strip_clear(led_strip_);
 }
 
@@ -97,15 +198,15 @@ void SingleLed::StartBlinkTask(int times, int interval_ms) {
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
-    esp_timer_stop(blink_timer_);
-    
+    StopAnimTimerLocked();
+
     blink_counter_ = times * 2;
     blink_interval_ms_ = interval_ms;
+    anim_mode_ = AnimMode::Blink;
     esp_timer_start_periodic(blink_timer_, interval_ms * 1000);
 }
 
 void SingleLed::OnBlinkTimer() {
-    std::lock_guard<std::mutex> lock(mutex_);
     blink_counter_--;
     if (blink_counter_ & 1) {
         led_strip_set_pixel(led_strip_, 0, r_, g_, b_);
@@ -114,13 +215,16 @@ void SingleLed::OnBlinkTimer() {
         led_strip_clear(led_strip_);
 
         if (blink_counter_ == 0) {
-            esp_timer_stop(blink_timer_);
+            StopAnimTimerLocked();
         }
     }
 }
 
 
 void SingleLed::OnStateChanged() {
+    if (manual_control_) {
+        return;
+    }
     auto& app = Application::GetInstance();
     auto device_state = app.GetDeviceState();
     switch (device_state) {
