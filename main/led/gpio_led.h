@@ -21,18 +21,26 @@ class GpioLed : public Led {
     void TurnOn();
     void TurnOff();
     void SetBrightness(uint8_t brightness);
+    uint8_t GetBrightness() const;
+    void SetManualBrightness(uint8_t brightness);
+    void ClearManualControl();
+    bool IsManualControl() const { return manual_control_; }
+    bool IsOn() const { return is_on_; }
 
  private:
     std::mutex mutex_;
     TaskHandle_t blink_task_ = nullptr;
     ledc_channel_config_t ledc_channel_ = {0};
     bool ledc_initialized_ = false;
+    uint8_t brightness_ = 50;
     uint32_t duty_ = 0;
+    bool is_on_ = false;
+    bool manual_control_ = false;
     int blink_counter_ = 0;
     int blink_interval_ms_ = 0;
     esp_timer_handle_t blink_timer_ = nullptr;
     bool fade_up_ = true;
-    TaskHandle_t event_task_handle_;
+    TaskHandle_t event_task_handle_ = nullptr;
     
     static void EventTask(void* arg);
     void StartBlinkTask(int times, int interval_ms);

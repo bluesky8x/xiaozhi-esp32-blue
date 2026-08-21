@@ -17,6 +17,7 @@
 #include "settings.h"
 #include "lvgl_theme.h"
 #include "lvgl_display.h"
+#include "led/gpio_led.h"
 
 #define TAG "MCP"
 
@@ -75,6 +76,46 @@ void McpServer::AddCommonTools() {
                 backlight->SetBrightness(brightness, true);
                 return true;
             });
+    }
+
+    auto led = board.GetLed();
+    if (led != nullptr) {
+        auto gpio_led = dynamic_cast<GpioLed*>(led);
+        if (gpio_led != nullptr) {
+            AddTool("self.led.set_brightness",
+                "Set the brightness of the 2-pin LED (0-100%).",
+                PropertyList({
+                    Property("brightness", kPropertyTypeInteger, 50, 0, 100)
+                }),
+                [gpio_led](const PropertyList& properties) -> ReturnValue {
+                    uint8_t brightness = static_cast<uint8_t>(properties["brightness"].value<int>());
+                    gpio_led->SetManualBrightness(brightness);
+                    return true;
+                });
+
+            AddTool("self.led.get_brightness",
+                "Get the current brightness of the LED (0-100%).",
+                PropertyList(),
+                [gpio_led](const PropertyList& properties) -> ReturnValue {
+                    return std::to_string(gpio_led->GetBrightness());
+                });
+
+            AddTool("self.led.turn_on",
+                "Turn on the LED.",
+                PropertyList(),
+                [gpio_led](const PropertyList& properties) -> ReturnValue {
+                    gpio_led->SetManualBrightness(gpio_led->GetBrightness() > 0 ? gpio_led->GetBrightness() : 100);
+                    return true;
+                });
+
+            AddTool("self.led.turn_off",
+                "Turn off the LED.",
+                PropertyList(),
+                [gpio_led](const PropertyList& properties) -> ReturnValue {
+                    gpio_led->SetManualBrightness(0);
+                    return true;
+                });
+        }
     }
 
 #ifdef HAVE_LVGL

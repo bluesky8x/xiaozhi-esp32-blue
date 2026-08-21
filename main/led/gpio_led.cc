@@ -98,11 +98,56 @@ GpioLed::~GpioLed() {
 
 
 void GpioLed::SetBrightness(uint8_t brightness) {
+    if (brightness > 100) {
+        brightness = 100;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    brightness_ = brightness;
     if (brightness == 100) {
         duty_ = LEDC_DUTY;
     } else {
-        duty_ = brightness * LEDC_DUTY / 100;
+        duty_ = (uint32_t)brightness * LEDC_DUTY / 100;
     }
+
+    if (ledc_initialized_ && is_on_) {
+        ledc_set_duty(ledc_channel_.speed_mode, ledc_channel_.channel, duty_);
+        ledc_update_duty(ledc_channel_.speed_mode, ledc_channel_.channel);
+    }
+}
+
+uint8_t GpioLed::GetBrightness() const {
+    return brightness_;
+}
+
+void GpioLed::SetManualBrightness(uint8_t brightness) {
+    if (brightness > 100) {
+        brightness = 100;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    manual_control_ = true;
+    esp_timer_stop(blink_timer_);
+    if (ledc_initialized_) {
+        ledc_fade_stop(ledc_channel_.speed_mode, ledc_channel_.channel);
+    }
+
+    brightness_ = brightness;
+    duty_ = (uint32_t)brightness * LEDC_DUTY / 100;
+    if (brightness > 0) {
+        is_on_ = true;
+        ledc_set_duty(ledc_channel_.speed_mode, ledc_channel_.channel, duty_);
+    } else {
+        is_on_ = false;
+        ledc_set_duty(ledc_channel_.speed_mode, ledc_channel_.channel, 0);
+    }
+    ledc_update_duty(ledc_channel_.speed_mode, ledc_channel_.channel);
+}
+
+void GpioLed::ClearManualControl() {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        manual_control_ = false;
+    }
+    OnStateChanged();
 }
 
 void GpioLed::TurnOn() {
@@ -113,6 +158,7 @@ void GpioLed::TurnOn() {
     std::lock_guard<std::mutex> lock(mutex_);
     esp_timer_stop(blink_timer_);
     ledc_fade_stop(ledc_channel_.speed_mode, ledc_channel_.channel);
+    is_on_ = true;
     ledc_set_duty(ledc_channel_.speed_mode, ledc_channel_.channel, duty_);
     ledc_update_duty(ledc_channel_.speed_mode, ledc_channel_.channel);
 }
@@ -125,6 +171,7 @@ void GpioLed::TurnOff() {
     std::lock_guard<std::mutex> lock(mutex_);
     esp_timer_stop(blink_timer_);
     ledc_fade_stop(ledc_channel_.speed_mode, ledc_channel_.channel);
+    is_on_ = false;
     ledc_set_duty(ledc_channel_.speed_mode, ledc_channel_.channel, 0);
     ledc_update_duty(ledc_channel_.speed_mode, ledc_channel_.channel);
 }
@@ -205,6 +252,9 @@ bool IRAM_ATTR GpioLed::FadeCallback(const ledc_cb_param_t *param, void *user_ar
 }
 
 void GpioLed::OnStateChanged() {
+    if (manual_control_) {
+        return;
+    }
     auto& app = Application::GetInstance();
     auto device_state = app.GetDeviceState();
     switch (device_state) {

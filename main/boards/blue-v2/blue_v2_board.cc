@@ -2,6 +2,7 @@
 #include "application.h"
 #include "button.h"
 #include "config.h"
+#include "led/gpio_led.h"
 #include "led/single_led.h"
 #include "system_reset.h"
 #include "power_save_timer.h"
@@ -455,8 +456,13 @@ public:
     }
 
     virtual Led* GetLed() override {
+#if defined(USE_GPIO_LED) && USE_GPIO_LED
+        static GpioLed led(BUILTIN_LED_GPIO);
+        return &led;
+#else
         static SingleLed led(BUILTIN_LED_GPIO);
         return &led;
+#endif
     }
 
     virtual AudioCodec* GetAudioCodec() override {
