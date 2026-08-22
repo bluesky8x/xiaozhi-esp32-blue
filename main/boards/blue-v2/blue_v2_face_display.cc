@@ -151,6 +151,7 @@ void BlueV2FaceDisplay::ShowFace(const char* emotion) {
 }
 
 void BlueV2FaceDisplay::SetEmotion(const char* emotion) {
+    Display::SetEmotion(emotion);
     ShowFace(emotion);
 }
 

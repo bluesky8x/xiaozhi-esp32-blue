@@ -392,6 +392,7 @@ void OledDisplay::SetupUI_128x32() {
 }
 
 void OledDisplay::SetEmotion(const char* emotion) {
+    Display::SetEmotion(emotion);
     auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
     const char* utf8 = noto_emoji_get_utf8(emotion);
     const lv_font_t* emotion_font = lvgl_theme->emoji_font()->font();

@@ -5,8 +5,8 @@
 
 #define TAG "GpioLed"
 
-#define DEFAULT_BRIGHTNESS 50
-#define HIGH_BRIGHTNESS 100
+#define DEFAULT_BRIGHTNESS 40
+#define HIGH_BRIGHTNESS 80
 #define LOW_BRIGHTNESS 10
 
 #define IDLE_BRIGHTNESS 5
@@ -98,16 +98,12 @@ GpioLed::~GpioLed() {
 
 
 void GpioLed::SetBrightness(uint8_t brightness) {
-    if (brightness > 100) {
-        brightness = 100;
+    if (brightness > 80) {
+        brightness = 80;
     }
     std::lock_guard<std::mutex> lock(mutex_);
     brightness_ = brightness;
-    if (brightness == 100) {
-        duty_ = LEDC_DUTY;
-    } else {
-        duty_ = (uint32_t)brightness * LEDC_DUTY / 100;
-    }
+    duty_ = (uint32_t)brightness * LEDC_DUTY / 100;
 
     if (ledc_initialized_ && is_on_) {
         ledc_set_duty(ledc_channel_.speed_mode, ledc_channel_.channel, duty_);
@@ -120,8 +116,8 @@ uint8_t GpioLed::GetBrightness() const {
 }
 
 void GpioLed::SetManualBrightness(uint8_t brightness) {
-    if (brightness > 100) {
-        brightness = 100;
+    if (brightness > 80) {
+        brightness = 80;
     }
     std::lock_guard<std::mutex> lock(mutex_);
     manual_control_ = true;
@@ -184,6 +180,17 @@ void GpioLed::Blink(int times, int interval_ms) {
     StartBlinkTask(times, interval_ms);
 }
 
+void GpioLed::BlinkFor(int duration_ms, int interval_ms) {
+    if (interval_ms <= 0) {
+        interval_ms = 150;
+    }
+    int times = duration_ms / (interval_ms * 2);
+    if (times <= 0) {
+        times = 1;
+    }
+    Blink(times, interval_ms);
+}
+
 void GpioLed::StartContinuousBlink(int interval_ms) {
     StartBlinkTask(BLINK_INFINITE, interval_ms);
 }
@@ -199,6 +206,10 @@ void GpioLed::StartBlinkTask(int times, int interval_ms) {
 
     blink_counter_ = times * 2;
     blink_interval_ms_ = interval_ms;
+    if (times > 0) {
+        manual_control_ = true;
+        is_on_ = true;
+    }
     esp_timer_start_periodic(blink_timer_, interval_ms * 1000);
 }
 
@@ -208,10 +219,31 @@ void GpioLed::OnBlinkTimer() {
     if (blink_counter_ & 1) {
         ledc_set_duty(ledc_channel_.speed_mode, ledc_channel_.channel, duty_);
     } else {
-        ledc_set_duty(ledc_channel_.speed_mode, ledc_channel_.channel, 0);
-
         if (blink_counter_ == 0) {
             esp_timer_stop(blink_timer_);
+            manual_control_ = false;
+
+            auto& app = Application::GetInstance();
+            auto device_state = app.GetDeviceState();
+            if (device_state == kDeviceStateSpeaking) {
+                brightness_ = 40;
+                duty_ = (uint32_t)40 * LEDC_DUTY / 100;
+                is_on_ = true;
+                ledc_set_duty(ledc_channel_.speed_mode, ledc_channel_.channel, duty_);
+            } else if (device_state == kDeviceStateListening || device_state == kDeviceStateAudioTesting) {
+                brightness_ = 80;
+                duty_ = (uint32_t)80 * LEDC_DUTY / 100;
+                is_on_ = true;
+                ledc_set_duty(ledc_channel_.speed_mode, ledc_channel_.channel, duty_);
+            } else if (device_state == kDeviceStateIdle) {
+                is_on_ = false;
+                ledc_set_duty(ledc_channel_.speed_mode, ledc_channel_.channel, 0);
+            } else {
+                is_on_ = true;
+                ledc_set_duty(ledc_channel_.speed_mode, ledc_channel_.channel, duty_);
+            }
+        } else {
+            ledc_set_duty(ledc_channel_.speed_mode, ledc_channel_.channel, 0);
         }
     }
     ledc_update_duty(ledc_channel_.speed_mode, ledc_channel_.channel);
@@ -260,16 +292,14 @@ void GpioLed::OnStateChanged() {
     switch (device_state) {
         case kDeviceStateStarting:
             SetBrightness(DEFAULT_BRIGHTNESS);
-            StartContinuousBlink(100);
+            TurnOn();
             break;
         case kDeviceStateWifiConfiguring:
             SetBrightness(DEFAULT_BRIGHTNESS);
             StartContinuousBlink(500);
             break;
         case kDeviceStateIdle:
-            SetBrightness(IDLE_BRIGHTNESS);
-            TurnOn();
-            // TurnOff();
+            TurnOff();
             break;
         case kDeviceStateConnecting:
             SetBrightness(DEFAULT_BRIGHTNESS);
@@ -277,24 +307,21 @@ void GpioLed::OnStateChanged() {
             break;
         case kDeviceStateListening:
         case kDeviceStateAudioTesting:
-            if (app.IsVoiceDetected()) {
-                SetBrightness(HIGH_BRIGHTNESS);
-            } else {
-                SetBrightness(LOW_BRIGHTNESS);
-            }
-            // TurnOn();
-            StartFadeTask();
+            // Mic chuyển sang lắng nghe -> bật đèn sáng (80% max)
+            SetBrightness(HIGH_BRIGHTNESS);
+            TurnOn();
             break;
         case kDeviceStateSpeaking:
-            SetBrightness(SPEAKING_BRIGHTNESS);
+            // Khi nói -> giảm brightness xuống 40
+            SetBrightness(40);
             TurnOn();
             break;
         case kDeviceStateUpgrading:
-            SetBrightness(UPGRADING_BRIGHTNESS);
+            SetBrightness(25);
             StartContinuousBlink(100);
             break;
         case kDeviceStateActivating:
-            SetBrightness(ACTIVATING_BRIGHTNESS);
+            SetBrightness(35);
             StartContinuousBlink(500);
             break;
         default:

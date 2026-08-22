@@ -1124,6 +1124,7 @@ void LcdDisplay::ClearChatMessages() {
 #endif
 
 void LcdDisplay::SetEmotion(const char* emotion) {
+    Display::SetEmotion(emotion);
     if (!setup_ui_called_) {
         ESP_LOGW(TAG, "SetEmotion('%s') called before SetupUI() - emotion will not be displayed!",
                  emotion);

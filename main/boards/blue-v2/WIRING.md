@@ -50,7 +50,7 @@ Nguồn tham chiếu firmware: `main/boards/blue-v2/config.h`
 | | | XSHUT (trước) | **GPIO 1** | Bật `TOF_FRONT_XSHUT_GPIO = 1` |
 | | | XSHUT (sau, hướng xuống) | **GPIO 2** | Bật `TOF_REAR_SENSOR_ENABLE = 1` |
 | | | I2C addr | **0x29 / 0x2A** | Sau init firmware |
-| 8 | **WS2812 RGB** (status) | DIN | **48** | 1 pixel GRB — `SingleLed` |
+| 8 | **LED 2 chân** (status) | Anode (qua R 220Ω) | **48** | PWM — `GpioLed` (LEDC_TIMER_1 / CH1) |
 | | | VCC / GND | **3.3 V / GND** | |
 | 9 | **BOOT** (nút trên module) | — | **0** | Giữ ≥ 5 s → factory reset |
 

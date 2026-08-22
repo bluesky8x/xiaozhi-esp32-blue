@@ -24,8 +24,10 @@ class GpioLed : public Led {
     uint8_t GetBrightness() const;
     void SetManualBrightness(uint8_t brightness);
     void ClearManualControl();
-    bool IsManualControl() const { return manual_control_; }
-    bool IsOn() const { return is_on_; }
+    void BlinkOnce();
+    void Blink(int times, int interval_ms);
+    void BlinkFor(int duration_ms, int interval_ms = 150);
+    void StartContinuousBlink(int interval_ms);
 
  private:
     std::mutex mutex_;
@@ -46,9 +48,6 @@ class GpioLed : public Led {
     void StartBlinkTask(int times, int interval_ms);
     void OnBlinkTimer();
 
-    void BlinkOnce();
-    void Blink(int times, int interval_ms);
-    void StartContinuousBlink(int interval_ms);
     void StartFadeTask();
     void OnFadeEnd();
     static bool IRAM_ATTR FadeCallback(const ledc_cb_param_t *param, void *user_arg);

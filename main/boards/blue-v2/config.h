@@ -25,10 +25,6 @@
 #define AUDIO_I2S_GPIO_DOUT GPIO_NUM_7   // speaker DIN
 
 #define BUILTIN_LED_GPIO        GPIO_NUM_48
-// Set 1 for 2-pin 3V LED (GpioLed/PWM), 0 for WS2812 RGB LED (SingleLed)
-#ifndef USE_GPIO_LED
-#define USE_GPIO_LED            1
-#endif
 #define BOOT_BUTTON_GPIO        GPIO_NUM_0
 #define TOUCH_BUTTON_GPIO       GPIO_NUM_16
 // TTP223 SIG goes HIGH when touched (most modules). Set 0 if your module is active-low.
