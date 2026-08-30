@@ -193,6 +193,7 @@ private:
     void ContinueWakeWordInvoke(const std::string& wake_word);
     void StartListeningAudio();
     void FinishSpeakingAfterTts();
+    void ArmSpeakingFinishCheck();
     void ConfigureWakeWordForListening();
     void EnsureListeningAfterRobotAction();
     void ResyncListeningAfterMotorStop();

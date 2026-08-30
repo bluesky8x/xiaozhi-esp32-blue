@@ -271,7 +271,10 @@ void AudioService::AudioInputTask() {
         }
 
         if (audio_input_need_warmup_.exchange(false)) {
-            vTaskDelay(pdMS_TO_TICKS(120));
+            // Trimmed 120ms -> 60ms: enough for the input to stabilize after
+            // re-enabling voice processing, keeps the speaking->listening
+            // hand-off snappier (Blue V2 target).
+            vTaskDelay(pdMS_TO_TICKS(60));
             continue;
         }
 
