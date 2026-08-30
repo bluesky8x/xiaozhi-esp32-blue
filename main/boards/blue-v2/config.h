@@ -150,7 +150,8 @@
 #define TOF_EDGE_PREMOVE_BUFFER_PCT 10
 
 // Fallback fixed thresholds when NOT calibrated yet (sensor ~128 mm to open floor):
-#define TOF_OBSTACLE_STOP_MM      96
+// Obstacle safe distance — stop when the front distance drops to/below this.
+#define TOF_OBSTACLE_STOP_MM      190
 #define TOF_CLIFF_VOID_MM         200
 
 // Rear/down sensor (optional):
