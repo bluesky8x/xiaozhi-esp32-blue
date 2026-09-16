@@ -26,7 +26,7 @@ Nguồn tham chiếu firmware: `main/boards/blue-v2/config.h`
 | | | DIN (data in) | **7** | |
 | | | SD (shutdown) | **3.3 V** | Luôn bật |
 | | | GAIN | GND hoặc NC | Mức gain mặc định |
-| | | VIN / GND | **3.3 V / GND** | |
+| | | VIN / GND | **5 V / GND** | Rail 5 V (USB hoặc buck/boost 5 V) |
 | 3 | **ST7789** 1.54" 240×240 (SPI) | SDA / MOSI | **10** | SPI3 — nhãn SDA trên module = MOSI |
 | | | SCL / SCK | **9** | |
 | | | DC | **8** | |
@@ -79,10 +79,16 @@ Nguồn tham chiếu firmware: `main/boards/blue-v2/config.h`
 | BCLK | GPIO **5** *(chung BCLK mic)* |
 | DIN | GPIO **7** |
 | SD | **3.3 V** *(always on)* |
-| VIN | **3.3 V** |
+| VIN | **5 V** |
 | GND | **GND** |
 
 > **Blue V2 vs V1:** V1 dùng LRCK/BCLK riêng trên GPIO **15/16** cho loa. V2 gộp WS+BCLK (**4/5**) — duplex 4 dây + nguồn.
+
+> **Nguồn MAX98357 — dùng 5 V, không phải 3.3 V.** VIN chịu **2.5–5.5 V**; cấp **5 V** cho công suất ra lớn hơn rõ rệt so với 3.3 V (3 W so với ~1 W trên loa 8 Ω). Cấp 5 V bằng rail 5 V của devkit USB, hoặc buck/boost **5 V** khi chạy pin (pin 1S 3.7–4.2 V cần boost để có 5 V, hoặc cấp trực tiếp 3.7–4.2 V vẫn chạy nhưng nhỏ hơn).
+>
+> Logic I2S (DIN/BCLK/LRC) vẫn là **3.3 V từ ESP32-S3** — ngưỡng vào của MAX98357 thấp nên **không cần level shifter**, kể cả khi VDD = 5 V.
+> **SD** giữ **3.3 V** (mức HIGH = bật) là đủ; **không** kéo SD lên 5 V nếu dùng chung nhóm dây 3.3 V.
+> Nếu loa bị rè/ồn khi VIN = 5 V: thêm tụ **100 µF** gần chân VIN của amp và giữ GND chung to, ngắn.
 
 ### 3. ST7789 1.54" 240×240 (SPI)
 
@@ -325,6 +331,7 @@ Tắt peripheral không dùng: đặt pin tương ứng `GPIO_NUM_NC` trong `con
     LCD CS ───────── GND
     INMP441 L/R ──── GND
     MAX98357 SD ──── 3.3 V
+    MAX98357 VIN ─── 5 V
 ```
 
 ---
@@ -340,7 +347,7 @@ Tắt peripheral không dùng: đặt pin tương ứng `GPIO_NUM_NC` trong `con
 
 USB ổn định vì nguồn 5 V mạnh + tụ trên devkit. Pin 4.2 V qua dây mỏng / không đủ tụ → điện áp 3.3 V **tụt** khi:
 - WiFi phát (peak **~300–500 mA**)
-- MAX98357 loa
+- MAX98357 loa — VIN nay lấy **5 V** nên dòng đỉnh lớn hơn khi cấp 3.3 V
 - LCD backlight (GPIO 17)
 - MX1508 motor (cùng lúc càng tệ)
 
@@ -353,7 +360,11 @@ Pin 1S LiPo 3.7–4.2 V
         │
         ├──► (tuỳ chọn) Sắc pin / BMS 1S
         │
-        ├──► Buck 5 V hoặc 3.3 V (≥2 A) ──► ESP32 + INMP441 + MAX98357 + LCD + ToF
+        ├──► Buck 5 V (≥2 A) ──► rail 5 V ──► MAX98357 VIN
+        │         │  + tụ 100 µF gần amp
+        │         └── GND chung
+        │
+        ├──► Buck/LDO 3.3 V (≥1 A) ──► rail 3.3 V ──► ESP32 + INMP441 + LCD + ToF + TTP223
         │         │  + tụ 470–1000 µF gần ESP32
         │         └── GND chung
         │
@@ -368,8 +379,9 @@ Pin 1S LiPo 3.7–4.2 V
 2. **Tụ bulk** 470–1000 µF trên rail **3.3 V** (càng gần ESP32 càng tốt)
 3. **Tụ 100 µF** trên **VMOT** MX1508
 4. **Không** chỉ cấp 4.2 V vào chân 3.3 V MCU — dùng **LDO/buck 3.3 V ≥ 1 A** (AMS1117 yếu khi WiFi; nên buck MP1584 / TLV62569)
-5. Motor **nên** cùng pin nhưng **tách đường dây** V+ (star ground), tránh motor chạy ngay khi robot đang nói nếu pin yếu
-6. Pin **≥ 1200 mAh**, C-rate đủ; pin c�ng / dây jumper mỏng → sag lớn
+5. MAX98357 VIN dùng **rail 5 V riêng** (USB 5 V khi bench, hoặc buck/boost 5 V khi chạy pin) — **không** lấy từ rail 3.3 V
+6. Motor **nên** cùng pin nhưng **tách đường dây** V+ (star ground), tránh motor chạy ngay khi robot đang nói nếu pin yếu
+7. Pin **≥ 1200 mAh**, C-rate đủ; pin cŨ / dây jumper mỏng → sag lớn
 
 ### Test nhanh
 
