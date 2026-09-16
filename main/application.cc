@@ -1,7 +1,7 @@
 #include "application.h"
 #include "board.h"
 #include "display.h"
-#include "led/single_led.h"
+#include "led/gpio_led.h"
 #include "device_state_machine.h"
 #include "lcd_display.h"
 #include "mcp_server.h"
@@ -47,6 +47,12 @@
 #include <cstring>
 
 #define TAG "Application"
+
+// After tts stop + playback drains, stay in Speaking only this long before
+// re-opening the mic (was 1500 ms). 400 ms still covers a queued
+// "sentence_start" for the next sentence while keeping the speaking->listening
+// hand-off snappy (Blue V2 target).
+static constexpr int64_t kSpeakingFinishGraceUs = 400 * 1000LL;
 
 Application::Application() {
     event_group_ = xEventGroupCreate();
@@ -272,7 +278,8 @@ void Application::Run() {
         if (bits & MAIN_EVENT_PLAYBACK_DRAINED) {
             if (GetDeviceState() == kDeviceStateSpeaking && tts_stop_received_ &&
                 audio_service_.IsPlaybackIdle()) {
-                speaking_finish_deadline_us_ = esp_timer_get_time() + 1500 * 1000LL;
+                speaking_finish_deadline_us_ = esp_timer_get_time() + kSpeakingFinishGraceUs;
+                ArmSpeakingFinishCheck();
             }
             if (GetDeviceState() == kDeviceStateListening &&
                 audio_service_.IsPlaybackIdle()) {
@@ -804,7 +811,8 @@ void Application::InitializeProtocol() {
                     tts_stop_received_ = true;
                     // Stay speaking until playback drains + grace (more sentences may follow).
                     speaking_finish_deadline_us_ =
-                        esp_timer_get_time() + 1500 * 1000LL;
+                        esp_timer_get_time() + kSpeakingFinishGraceUs;
+                    ArmSpeakingFinishCheck();
                     if (GetDeviceState() == kDeviceStateListening) {
                         pending_listening_start_ = false;
                         SetDeviceState(kDeviceStateSpeaking);
@@ -1273,6 +1281,37 @@ void Application::HandleStateChangedEvent() {
     }
 }
 
+void Application::ArmSpeakingFinishCheck() {
+    // Post a CLOCK_TICK shortly after the speaking-finish deadline so the
+    // speaking->listening transition is evaluated promptly instead of waiting
+    // for the next 1 s periodic clock tick.
+    static esp_timer_handle_t speaking_finish_timer = nullptr;
+    if (speaking_finish_timer == nullptr) {
+        esp_timer_create_args_t args = {
+            .callback =
+                [](void* arg) {
+                    Application* app = static_cast<Application*>(arg);
+                    xEventGroupSetBits(app->event_group_, MAIN_EVENT_CLOCK_TICK);
+                },
+            .arg = this,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "speak_finish",
+            .skip_unhandled_events = true,
+        };
+        ESP_ERROR_CHECK(esp_timer_create(&args, &speaking_finish_timer));
+    }
+    esp_timer_stop(speaking_finish_timer);
+    const int64_t now_us = esp_timer_get_time();
+    int64_t delay_us = speaking_finish_deadline_us_ - now_us;
+    if (delay_us < 0) {
+        delay_us = 0;
+    }
+    // +80 ms so the deadline is comfortably in the past when the tick fires.
+    ESP_ERROR_CHECK(esp_timer_start_once(
+        speaking_finish_timer,
+        static_cast<uint64_t>(delay_us) + 80 * 1000));
+}
+
 void Application::FinishSpeakingAfterTts() {
     speaking_awaiting_audio_ = false;
     speaking_started_us_ = 0;
@@ -1700,31 +1739,11 @@ void Application::BeginDanceSession() {
 namespace {
 
 void ApplyMusicEqLed(const std::string& label) {
-    auto* led = dynamic_cast<SingleLed*>(Board::GetInstance().GetLed());
-    if (led == nullptr) {
-        return;
-    }
-    // Center color ↔ accent — smooth pulse (1-pixel gradient feel).
-    if (label == "chill") {
-        led->SetManualColorGradient(0, 4, 22, 0, 14, 32, 1400);
-    } else if (label == "groove") {
-        led->SetManualColorGradient(0, 18, 2, 18, 28, 0, 900);
-    } else if (label == "drive") {
-        led->SetManualColorGradient(22, 8, 0, 32, 14, 0, 550);
-    } else if (label == "drop") {
-        led->SetManualColorGradient(18, 0, 24, 32, 0, 12, 380);
-    } else if (label == "flow") {
-        led->SetManualColorGradient(0, 12, 20, 0, 22, 28, 1000);
-    } else {
-        led->SetManualColorGradient(0, 18, 2, 18, 28, 0, 900);
-    }
+    // 2-pin LED stays solid — no dynamic changes during dance sessions
 }
 
 void ClearMusicEqLed() {
-    auto* led = dynamic_cast<SingleLed*>(Board::GetInstance().GetLed());
-    if (led != nullptr) {
-        led->ClearManualColor();
-    }
+    // 2-pin LED stays solid — no dynamic changes during dance sessions
 }
 
 }  // namespace

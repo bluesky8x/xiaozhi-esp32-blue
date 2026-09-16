@@ -2,7 +2,7 @@
 #include "application.h"
 #include "button.h"
 #include "config.h"
-#include "led/single_led.h"
+#include "led/gpio_led.h"
 #include "system_reset.h"
 #include "power_save_timer.h"
 #include "assets/lang_config.h"
@@ -455,7 +455,8 @@ public:
     }
 
     virtual Led* GetLed() override {
-        static SingleLed led(BUILTIN_LED_GPIO);
+        // Use LEDC_TIMER_1/CHANNEL_1 — CHANNEL_0 is taken by PwmBacklight.
+        static GpioLed led(BUILTIN_LED_GPIO, 0, LEDC_TIMER_1, LEDC_CHANNEL_1);
         return &led;
     }
 

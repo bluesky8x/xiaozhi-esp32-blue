@@ -136,6 +136,7 @@ EmoteDisplay::~EmoteDisplay()
 
 void EmoteDisplay::SetEmotion(const char* const emotion)
 {
+    Display::SetEmotion(emotion);
     ESP_LOGI(TAG, "SetEmotion: %s", emotion);
     if (emote_handle_ && emotion && strlen(emotion) > 0) {
         emote_set_anim_emoji(emote_handle_, emotion);
