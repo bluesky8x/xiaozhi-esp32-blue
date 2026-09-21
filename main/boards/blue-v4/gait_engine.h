@@ -62,6 +62,13 @@ public:
     // step_ms * 4. Callers converting a requested duration into a step count must use this.
     static int JointCrawlCycleMs(int step_ms);
 
+    // Cách thực hiện cú vung của một chân (xem GAIT_JOINT_SWING_DIRECT trong config.h):
+    // false = đường cong "mix" (arc), true = giao đích từng bước kiểu Sesame (direct).
+    // Đổi được lúc chạy (tool self.gait.swing / tag srv:swing=) nên có thể so sánh A/B ngay
+    // trên bàn mà không phải nạp lại firmware.
+    void SetSwingDirect(bool direct) { swing_direct_.store(direct); }
+    bool SwingDirect() const { return swing_direct_.load(); }
+
     // Registers self.gait.* MCP tools.
     void RegisterMcpTools();
 
@@ -144,6 +151,16 @@ private:
     bool RampJointsArc(const float from[SERVO_COUNT], float next[SERVO_COUNT], int hip_joint,
                        int knee_joint, float hip_to, float knee_fold_deg, int duration_ms);
 
+    // Cú vung của một chân: nhấc chân + quét hip + hạ chân. Chọn ARC hay DIRECT theo
+    // swing_direct_ (xem config.h). `next` nhận đúng trạng thái cuối của cú vung.
+    bool SwingLeg(const float from[SERVO_COUNT], float next[SERVO_COUNT], int hip_joint,
+                  int knee_joint, float hip_to, float knee_fold_deg, int phase_ms,
+                  int plant_dwell_ms);
+    // Kiểu Sesame: chỉ giao ĐÍCH rồi chờ servo tự đi tới (không vẽ đường cong). duration_ms
+    // dùng để chọn slew, min_dwell_ms là thời gian giữ tối thiểu trước khi trả về.
+    bool MoveDirect(const float from[SERVO_COUNT], const float next[SERVO_COUNT], int duration_ms,
+                    int min_dwell_ms);
+
     // Wait until the servos have physically settled: at least min_ms of dwell AND the limiter
     // has caught up with the target (timeout_ms caps the wait). RampJoints finishes on time, but
     // a loaded servo lands later — the hip must not rotate back before the foot is on the ground.
@@ -164,6 +181,7 @@ private:
 
     std::atomic<bool> busy_{false};
     std::atomic<bool> cancel_{false};
+    std::atomic<bool> swing_direct_{GAIT_JOINT_SWING_DIRECT != 0};
 
     float body_height_mm_ = BODY_STAND_HEIGHT_MM;
     float pitch_deg_ = 0.0f;

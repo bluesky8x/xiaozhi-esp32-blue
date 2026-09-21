@@ -152,7 +152,9 @@ private:
     bool relaxed_ = true;
     float slew_deg_per_sec_ = SERVO_SLEW_DEG_PER_SEC;
     float accel_deg_per_sec2_ = SERVO_ACCEL_DEG_PER_SEC2;
-    float vel_deg_s_[SERVO_COUNT] = {};  // per-joint speed for the trapezoid profile
+    float vel_deg_s_[SERVO_COUNT] = {};        // per-joint speed for the trapezoid profile
+    int64_t hold_until_ms_[SERVO_COUNT] = {};  // giãn nhịp: chưa tới giờ thì chưa khởi động
+    uint8_t pwm_write_cursor_ = 0;             // xoay vòng kênh ghi PWM mỗi tick
     int64_t last_target_ms_ = 0;
     int64_t boot_neutral_at_ms_ = 0;  // 0 = inactive; set by StartBootNeutral()
     uint32_t tick_writes_ = 0;        // PCA9685 writes in the last Tick()

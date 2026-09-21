@@ -105,9 +105,8 @@ void ServoController::LoadTrims() {
         const bool mount_inverted = ((SERVO_INVERT_DEFAULT_MASK >> i) & 0x01) != 0;
         inverted_[i] = nvs_inverted != mount_inverted;
     }
-    ESP_LOGI(TAG, "loaded trims from NVS namespace %s (pulse band %u..%u us)",
-             kNvsNamespace, static_cast<unsigned>(min_pulse_us_),
-             static_cast<unsigned>(max_pulse_us_));
+    ESP_LOGI(TAG, "loaded trims from NVS namespace %s (pulse band %u..%u us)", kNvsNamespace,
+             static_cast<unsigned>(min_pulse_us_), static_cast<unsigned>(max_pulse_us_));
 }
 
 bool ServoController::PersistTrims() {
@@ -243,10 +242,29 @@ bool ServoController::RawPulse(uint8_t joint, uint16_t pulse_us) {
 void ServoController::SetTargets(const float angles_deg[SERVO_COUNT]) {
     std::lock_guard<std::mutex> lock(state_mutex_);
     boot_neutral_at_ms_ = 0;  // an explicit pose wins over the boot pose
+    const int64_t now_ms = esp_timer_get_time() / 1000;
+
+    float clamped[SERVO_COUNT];
+    bool stepping[SERVO_COUNT] = {};
+    int stepped = 0;
     for (int i = 0; i < SERVO_COUNT; i++) {
-        target_deg_[i] = ClampAngle(static_cast<uint8_t>(i), angles_deg[i]);
+        clamped[i] = ClampAngle(static_cast<uint8_t>(i), angles_deg[i]);
+        stepping[i] = fabsf(clamped[i] - target_deg_[i]) >= SERVO_STAGGER_MIN_STEP_DEG;
+        if (stepping[i]) {
+            stepped++;
+        }
     }
-    last_target_ms_ = esp_timer_get_time() / 1000;
+    // Giãn nhịp khởi động (xem SERVO_STAGGER_* trong config.h): chỉ áp dụng cho lệnh làm nhiều
+    // servo nhảy cùng lúc. Một lệnh khác (kể cả dòng nội suy của gait) luôn xoá hold ⇒ không có
+    // servo nào bị kẹt chờ.
+    const bool stagger = SERVO_STAGGER_START_ENABLE && stepped >= 2;
+    int slot = 0;
+    for (int i = 0; i < SERVO_COUNT; i++) {
+        target_deg_[i] = clamped[i];
+        hold_until_ms_[i] =
+            (stagger && stepping[i]) ? now_ms + static_cast<int64_t>(slot++) * SERVO_STAGGER_MS : 0;
+    }
+    last_target_ms_ = now_ms;
 }
 
 void ServoController::SetTarget(uint8_t joint, float angle_deg) {
@@ -256,6 +274,7 @@ void ServoController::SetTarget(uint8_t joint, float angle_deg) {
     std::lock_guard<std::mutex> lock(state_mutex_);
     boot_neutral_at_ms_ = 0;  // an explicit target wins over the boot pose
     target_deg_[joint] = ClampAngle(joint, angle_deg);
+    hold_until_ms_[joint] = 0;
     last_target_ms_ = esp_timer_get_time() / 1000;
 }
 
@@ -410,7 +429,13 @@ void ServoController::ApplyEnabledLocked() {
     relaxed_ = false;
 }
 
-void ServoController::ApplyRelaxedLocked() { relaxed_ = true; }
+void ServoController::ApplyRelaxedLocked() {
+    relaxed_ = true;
+    for (int i = 0; i < SERVO_COUNT; i++) {
+        hold_until_ms_[i] = 0;  // bỏ mọi lượt chờ giãn nhịp còn treo
+        vel_deg_s_[i] = 0.0f;
+    }
+}
 
 void ServoController::RunCommand(const Cmd& cmd) {
     std::lock_guard<std::mutex> lock(state_mutex_);
@@ -538,11 +563,25 @@ void ServoController::Tick(float dt_s) {
     bool any_write = false;
     bool moved = false;
 
-    for (int i = 0; i < SERVO_COUNT; i++) {
+    // Giãn nhịp ghi PWM: bắt đầu từ một kênh xoay vòng và chỉ ghi tối đa
+    // SERVO_PWM_MAX_WRITES_PER_TICK kênh mỗi tick, để 8 kênh không dồn vào cùng một thời điểm.
+    int write_budget = SERVO_PWM_MAX_WRITES_PER_TICK;
+    const int write_start = pwm_write_cursor_;
+
+    for (int n = 0; n < SERVO_COUNT; n++) {
+        const int i = (write_start + n) % SERVO_COUNT;
         const float delta = target_deg_[i] - current_deg_[i];
         if (delta == 0.0f) {
             vel_deg_s_[i] = 0.0f;
             continue;
+        }
+        // Giãn nhịp khởi động: servo chưa tới lượt thì còn đứng yên (không khởi động cùng lúc).
+        if (hold_until_ms_[i] != 0) {
+            if (now_ms < hold_until_ms_[i]) {
+                vel_deg_s_[i] = 0.0f;
+                continue;
+            }
+            hold_until_ms_[i] = 0;
         }
 
         // Trapezoid speed profile: ramp up at accel_deg_per_sec2_, then ramp down so we
@@ -578,7 +617,8 @@ void ServoController::Tick(float dt_s) {
         const uint16_t ticks = pca_.PulseUsToTicks(pulse);
         const int diff =
             last_ticks_[i] == 0xFFFF ? 1000 : abs(static_cast<int>(ticks) - last_ticks_[i]);
-        if (hardware_ && diff >= kMinTickDeltaToWrite) {
+        if (hardware_ && diff >= kMinTickDeltaToWrite && write_budget > 0) {
+            write_budget--;  // kênh chưa được ghi sẽ vẫn "cần ghi" ở tick sau
             if (pca_.SetChannelPulseUs(kJointChannel[i], pulse)) {
                 last_ticks_[i] = ticks;
                 any_write = true;
@@ -588,6 +628,7 @@ void ServoController::Tick(float dt_s) {
             }
         }
     }
+    pwm_write_cursor_ = static_cast<uint8_t>((write_start + 1) % SERVO_COUNT);
 
     if (!moved && !any_write && !hold_ && !relaxed_ &&
         (now_ms - last_target_ms_) > SERVO_IDLE_RELAX_MS) {

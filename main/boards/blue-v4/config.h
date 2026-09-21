@@ -110,6 +110,18 @@
 #define SERVO_TICK_DEBUG_LOG 1
 #define SERVO_CMD_QUEUE_DEPTH 8
 
+// --- Giãn nhịp PWM (kiểu "motorCurrentDelay" của Sesame) ---
+// 8 servo cùng khởi động trong một nhịp là lúc rail 5 V sụt mạnh nhất (nhìn log mic sẽ thấy
+// agc tụt). Khi một lệnh làm NHIỀU servo nhảy một bước lớn cùng lúc (đứng lên, đổi tư thế,
+// enable) thì các servo được "thả" lệch nhau SERVO_STAGGER_MS thay vì cùng một nhịp.
+// Dòng nội suy của gait (delta nhỏ, 100 Hz) KHÔNG bị giãn — nó không phải bước nhảy.
+#define SERVO_STAGGER_START_ENABLE 1
+#define SERVO_STAGGER_MIN_STEP_DEG 12.0f  // >= mức này mới coi là "bước nhảy"
+#define SERVO_STAGGER_MS 20               // khoảng cách giữa 2 servo liên tiếp (Sesame: 20 ms)
+// Trần số kênh ghi PWM trong MỘT tick, xoay vòng điểm bắt đầu ⇒ 8 kênh không dồn vào cùng
+// một thời điểm (vừa đủ cho gait: 1 cú vung = 2 kênh, pha push = 4 hip).
+#define SERVO_PWM_MAX_WRITES_PER_TICK 4
+
 // Servo calibration / motion defaults (per-servo trim lives in NVS, see servo_controller).
 #define SERVO_DEFAULT_MIN_DEG 0.0f
 #define SERVO_DEFAULT_MAX_DEG 180.0f
@@ -209,7 +221,9 @@
 #define LEG_HIP_OFFSET_X_MM 45.0f   // body centre -> hip axis, fore/aft
 #define LEG_HIP_OFFSET_Y_MM 55.0f   // body centre -> hip axis, left/right
 #define BODY_STAND_HEIGHT_MM 95.0f  // default hip->foot vertical distance
-#define BODY_MIN_HEIGHT_MM 70.0f
+// Ngồi (pst:sit) = hạ thân xuống mức này; self.gait.body cũng hạ được tới đây.
+// 62 mm ⇒ knee gập (95-62)*1.30 ≈ 43° (bản cũ 70 mm ⇒ 32.5°) = hành trình ngồi +30%.
+#define BODY_MIN_HEIGHT_MM 62.0f
 #define BODY_MAX_HEIGHT_MM 120.0f
 #define STRIDE_LENGTH_MM 40.0f  // default crawl stride
 
@@ -243,6 +257,13 @@
 // RC mượt. Bàn giao xong, phải chờ chân THẬT SỰ chạm nền rồi mới cho hip quay về (plant settle).
 //   0.0 = tam giác thuần (knee đi chậm nhất → servo bám được)
 //   0.2 = giữ chân ở đỉnh 20% hành trình (chân cao lâu hơn, nhưng knee phải đi nhanh hơn ~25%)
+// Cách thực hiện CÚ VUNG của một chân:
+//   0 = ARC    : một đường cong "mix" hip+knee trên cùng một tham số (mượt, nhanh) — mặc định.
+//   1 = DIRECT : kiểu Sesame — giao ĐÍCH từng bước (knee nhấc lên → hip quét → knee hạ xuống)
+//                rồi chờ servo TỰ ĐI tới, không nội suy đường cong nào.
+// Đổi được lúc chạy bằng tool self.gait.swing hoặc tag srv:swing=arc|direct, không cần nạp lại.
+#define GAIT_JOINT_SWING_DIRECT 0
+
 #define GAIT_JOINT_LIFT_HOLD_FRAC 0.0f
 // Cho phép servo bám đường cong trễ hơn bao nhiêu độ. Slew/accel của limiter được đặt thành
 // 1.3x tốc độ đỉnh và rate^2/(2*lag) để sai số bám không vượt giá trị này — nhờ vậy chân không
@@ -262,6 +283,13 @@
 // Joint-space posture (spider geometry): extra knee fold per mm of body-height reduction.
 // Approximation for the 60 mm tibia at ~45 deg: about 1.3 deg of fold per mm.
 #define GAIT_JOINT_CROUCH_DEG_PER_MM 1.30f
+// --- Tốc độ đổi tư thế (ngồi / đứng / nghiêng) ---
+// Thời gian = hành trình lớn nhất / rate, kẹp trong [min, max]. Trước đây cố định 900 ms cho
+// MỌI tư thế nên ngồi/đứng rất chậm (43° trong 0.9 s ≈ 48 deg/s).
+//  140 deg/s ⇒ ngồi/đứng (43°) ≈ 310 ms; nghiêng nhỏ bị kẹp ở 300 ms.
+#define POSTURE_RATE_DEG_PER_SEC 140.0f
+#define POSTURE_MIN_MS 300
+#define POSTURE_MAX_MS 900
 // Knee-fold bias per degree of body pitch (positive = nose down) / roll (positive = left down).
 #define GAIT_JOINT_TILT_DEG_PER_DEG 0.6f
 // Distance from the hip yaw axis to the foot tip at neutral, in mm (documentation / travel maths).

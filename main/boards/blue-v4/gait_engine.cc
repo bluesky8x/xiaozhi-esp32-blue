@@ -430,6 +430,68 @@ bool GaitEngine::RampJointsArc(const float from[SERVO_COUNT], float next[SERVO_C
     return !cancel_.load();
 }
 
+// Kiểu Sesame: chỉ giao ĐÍCH cho servo rồi chờ nó TỰ ĐI tới (không vẽ đường cong nào). Slew được
+// chọn theo duration_ms để servo tới nơi trong khoảng thời gian đã hứa, accel đủ cao để không bò.
+bool GaitEngine::MoveDirect(const float from[SERVO_COUNT], const float next[SERVO_COUNT],
+                            int duration_ms, int min_dwell_ms) {
+    duration_ms = std::clamp(duration_ms, 80, 8000);
+    float max_travel = 0.0f;
+    for (int i = 0; i < SERVO_COUNT; i++) {
+        max_travel = std::max(max_travel, fabsf(next[i] - from[i]));
+    }
+    if (max_travel < 0.1f) {
+        return true;
+    }
+    const float slew =
+        std::clamp(max_travel * 1300.0f / static_cast<float>(duration_ms), 40.0f, 600.0f);
+    servos_->SetSlewDegPerSec(slew);
+    servos_->SetAccelDegPerSec2(std::max(2000.0f, slew * 12.0f));
+    servos_->EnableOutputs();
+    servos_->SetHold(true);
+    servos_->SetTargets(next);
+    return WaitForJointsSettled(min_dwell_ms, duration_ms + GAIT_JOINT_SETTLE_TIMEOUT_MS);
+}
+
+bool GaitEngine::SwingLeg(const float from[SERVO_COUNT], float next[SERVO_COUNT], int hip_joint,
+                          int knee_joint, float hip_to, float knee_fold_deg, int phase_ms,
+                          int plant_dwell_ms) {
+    for (int i = 0; i < SERVO_COUNT; i++) {
+        next[i] = from[i];
+    }
+    if (!swing_direct_.load()) {
+        // ARC: một đường cong duy nhất cho cả hip và knee (mix trên cùng một tham số), rồi CHỜ
+        // cho servo đưa bàn chân xuống nền thật sự trước khi pha sau quay hip về.
+        if (!RampJointsArc(from, next, hip_joint, knee_joint, hip_to, knee_fold_deg, phase_ms)) {
+            return false;
+        }
+        return WaitForJointsSettled(plant_dwell_ms, plant_dwell_ms + GAIT_JOINT_SETTLE_TIMEOUT_MS);
+    }
+
+    // DIRECT (kiểu Sesame): ba bước giao đích, mỗi bước chờ servo THẬT SỰ tới nơi.
+    const float knee_up = SERVO_DEFAULT_NEUTRAL_DEG + std::clamp(knee_fold_deg, 0.0f, 90.0f);
+    float pose[SERVO_COUNT];
+
+    // 1) knee nhấc lên trước — bàn chân rời nền trong khi hip chưa quay.
+    next[knee_joint] = knee_up;
+    if (!MoveDirect(from, next, phase_ms, 0)) {
+        return false;
+    }
+    // 2) hip quét ra trước trong khi knee vẫn giữ trên cao.
+    for (int i = 0; i < SERVO_COUNT; i++) {
+        pose[i] = next[i];
+    }
+    next[hip_joint] = hip_to;
+    if (!MoveDirect(pose, next, phase_ms, 0)) {
+        return false;
+    }
+    // 3) hạ knee về neutral — bàn chân chạm nền rồi giữ thêm plant_dwell_ms.
+    for (int i = 0; i < SERVO_COUNT; i++) {
+        pose[i] = next[i];
+    }
+    next[knee_joint] = SERVO_DEFAULT_NEUTRAL_DEG;
+    return MoveDirect(pose, next, phase_ms, plant_dwell_ms);
+}
+
 bool GaitEngine::WaitForJointsSettled(int min_ms, int timeout_ms) {
     // RampJoints drives the *commanded* curve on schedule; the servo (heavily loaded on the
     // support legs) reaches the position later. Give the joint time to really get there before
@@ -479,9 +541,20 @@ std::string GaitEngine::ApplyJointPosture(int height_mm, int pitch_deg, int roll
         next[leg * 2 + 1] = SERVO_DEFAULT_NEUTRAL_DEG + crouch + bias;
     }
 
+    // Đổi tư thế theo hành trình thật (xem POSTURE_* trong config.h): ngồi/đứng sâu thì đi lâu
+    // hơn một chút, nghiêng nhẹ thì nhanh — trước đây cố định 900 ms cho mọi tư thế nên ngồi
+    // xuống / đứng lên rất chậm.
+    float max_travel = 0.0f;
+    for (int i = 0; i < SERVO_COUNT; i++) {
+        max_travel = std::max(max_travel, fabsf(next[i] - from[i]));
+    }
+    const int duration_ms =
+        std::clamp(static_cast<int>(max_travel * 1000.0f / POSTURE_RATE_DEG_PER_SEC),
+                   POSTURE_MIN_MS, POSTURE_MAX_MS);
+
     servos_->EnableOutputs();
     servos_->SetHold(true);
-    if (!RampJoints(from, next, 900)) {
+    if (!RampJoints(from, next, duration_ms)) {
         return "cancelled";
     }
     body_height_mm_ = static_cast<float>(height_mm);
@@ -538,16 +611,16 @@ std::string GaitEngine::RunWalkJoint(int steps, int step_ms, int8_t sign, float 
     const float hip_back = center - half * sense;
     const float knee_fold = std::clamp(knee_travel_deg, 0.0f, 90.0f);
 
-    // step_ms is the time of one mixed swing arc; the push uses the same time.
+    // step_ms is the time of one swing (arc curve or the three direct steps); push uses it too.
     const JointPhaseMs phase = JointPhases(step_ms, knee_fold);
     const int swing_ms = phase.swing;
     const int push_ms = phase.push;
     const int plant_settle_ms = phase.settle;
     ESP_LOGI(TAG,
-             "joint walk: %d steps, swing arc %d ms, plant settle %d ms, push %d ms, "
+             "joint walk: %d steps, swing %s, swing %d ms, plant settle %d ms, push %d ms, "
              "hip travel %.0f deg, knee fold %.0f deg",
-             steps, swing_ms, plant_settle_ms, push_ms, static_cast<double>(hip_travel_deg),
-             static_cast<double>(knee_fold));
+             steps, swing_direct_.load() ? "direct" : "arc", swing_ms, plant_settle_ms, push_ms,
+             static_cast<double>(hip_travel_deg), static_cast<double>(knee_fold));
 
     servos_->EnableOutputs();
     servos_->SetHold(true);
@@ -587,20 +660,14 @@ std::string GaitEngine::RunWalkJoint(int steps, int step_ms, int8_t sign, float 
             const int hip = leg * 2;
             const int knee = hip + 1;
 
-            // 1) MỘT cú vung: hip quét ra trước + knee nhấc/hạ theo cùng một tham số (kiểu mix
-            //    trong RC) ⇒ không có điểm dừng giữa chân. Cú vung tính từ mô hình đã ra lệnh
-            //    (`from`), và luôn đáp knee về đúng neutral ⇒ bàn chân chắc chắn hạ xuống nền.
-            if (!RampJointsArc(from, next, hip, knee, hip_forward, knee_fold, swing_ms)) {
+            // 1) CÚ VUNG: nhấc chân + quét hip + hạ chân (ARC hay DIRECT — xem SwingLeg).
+            //    Cả hai cách đều tính từ mô hình đã ra lệnh (`from`), đều đáp knee về đúng
+            //    neutral, và CHỜ tới khi bàn chân thật sự trên nền rồi mới trả về.
+            if (!SwingLeg(from, next, hip, knee, hip_forward, knee_fold, swing_ms,
+                          plant_settle_ms)) {
                 return "cancelled";
             }
             commit();
-
-            // 2) Chờ chân THẬT SỰ chạm nền rồi mới cho hip quay về. Target đã đứng yên nên
-            //    IsMoving() lúc này phản ánh đúng trạng thái thật của servo.
-            if (!WaitForJointsSettled(plant_settle_ms,
-                                      plant_settle_ms + GAIT_JOINT_SETTLE_TIMEOUT_MS)) {
-                return "cancelled";
-            }
 
             // 4) Body advance: all four hips rotate back together (the feet stay planted).
             for (int l = 0; l < 4; l++) {
@@ -1114,6 +1181,21 @@ void GaitEngine::RegisterMcpTools() {
                 "PCA9685 hardware are ready (debug).",
                 PropertyList(),
                 [this](const PropertyList&) -> ReturnValue { return StatusJson(); });
+
+    mcp.AddTool("self.gait.swing",
+                "Choose how a swing step is executed. mode=\"arc\" = one continuous mixed "
+                "hip+knee curve driven by a single parameter (smooth, fast). mode=\"direct\" = "
+                "hand the target to the servo one step at a time (knee up, hip sweep, knee down) "
+                "and wait for it to arrive (Sesame style: simpler, servo does the smoothing). "
+                "Use for: kiểu bước chân, arc, direct, trực tiếp.",
+                PropertyList({Property("mode", kPropertyTypeString, "arc")}),
+                [this](const PropertyList& properties) -> ReturnValue {
+                    const std::string mode = properties["mode"].value<std::string>();
+                    const bool direct = (mode == "direct" || mode == "sesame");
+                    SetSwingDirect(direct);
+                    return std::string("{\"ok\":true,\"swing\":\"") + (direct ? "direct" : "arc") +
+                           "\"}";
+                });
 
     mcp.AddTool("self.gait.leg_test",
                 "Bring-up/calibration: move ONE leg by inverse kinematics while the other three "
