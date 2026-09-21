@@ -62,6 +62,26 @@ public:
     // Pose hold: while true the idle-relax timeout does not relax the servos.
     void SetHold(bool hold);
 
+    // Bring every joint to the neutral point after delay_ms (soft boot pose).
+    // Cancelled automatically as soon as any pose/target is published.
+    void StartBootNeutral(uint32_t delay_ms);
+
+    // Move ONE joint from its current angle to `to_deg` over duration_ms (smoothstep). Runs in the
+    // worker task, independent of the gait engine: use it to prove the PWM path works.
+    bool SweepJoint(uint8_t joint, float to_deg, uint32_t duration_ms);
+
+    // ---- pulse calibration ----
+    // Raw pulse band (us) that maps onto 0..180 deg. Defaults come from config.h, overridable at
+    // runtime (persisted in NVS) so a servo whose usable band is e.g. 1000..2000 us can be matched
+    // without reflashing.
+    void SetPulseRange(uint16_t min_us, uint16_t max_us);
+    void GetPulseRange(uint16_t* min_us, uint16_t* max_us) const;
+    // Hold one joint at an exact pulse width, bypassing the angle mapping entirely (hardware test).
+    bool RawPulse(uint8_t joint, uint16_t pulse_us);
+    // Drive one raw PCA9685 channel (0..15) at an exact pulse width — use it to test a spare
+    // channel (8..15) with a known-good servo, or to prove a channel still works.
+    bool RawChannel(uint8_t channel, uint16_t pulse_us);
+
     // Queue discrete commands (non-blocking).
     bool Relax();
     bool EnableOutputs();
@@ -88,12 +108,15 @@ private:
         kSetTrim,
         kSetInverted,
         kStop,
+        kSweep,
     };
 
     struct Cmd {
         CmdType type;
         uint8_t joint;
         int32_t value;
+        int32_t value2;
+        int32_t value3;
     };
 
     void LoadTrims();
@@ -107,7 +130,8 @@ private:
     void RunCommand(const Cmd& cmd);
     static void TaskEntry(void* arg);
     void TaskLoop();
-    bool Enqueue(CmdType type, uint8_t joint = 0, int32_t value = 0);
+    bool Enqueue(CmdType type, uint8_t joint = 0, int32_t value = 0, int32_t value2 = 0,
+                 int32_t value3 = 0);
 
     Pca9685 pca_;
     bool ready_ = false;
@@ -130,6 +154,17 @@ private:
     float accel_deg_per_sec2_ = SERVO_ACCEL_DEG_PER_SEC2;
     float vel_deg_s_[SERVO_COUNT] = {};  // per-joint speed for the trapezoid profile
     int64_t last_target_ms_ = 0;
+    int64_t boot_neutral_at_ms_ = 0;  // 0 = inactive; set by StartBootNeutral()
+    uint32_t tick_writes_ = 0;        // PCA9685 writes in the last Tick()
+    uint32_t tick_write_fails_ = 0;   // PCA9685 writes that failed in the last Tick()
+    int64_t boot_release_at_ms_ = 0;  // 0 = inactive; release pose hold at this time
+    int64_t sweep_end_ms_ = 0;        // 0 = inactive; smoothstep sweep deadline
+    int64_t sweep_start_ms_ = 0;
+    uint8_t sweep_joint_ = 0;
+    float sweep_from_deg_ = SERVO_DEFAULT_NEUTRAL_DEG;
+    float sweep_to_deg_ = SERVO_DEFAULT_NEUTRAL_DEG;
+    uint16_t min_pulse_us_ = SERVO_MIN_PULSE_US;
+    uint16_t max_pulse_us_ = SERVO_MAX_PULSE_US;
 
     static ServoController* instance_;
 };

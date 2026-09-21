@@ -74,43 +74,88 @@ Quy tắc: **mỗi leg dùng 2 kênh liền nhau, kênh CHẴN = HIP, kênh LẺ
 
 ### Lắp servo HIP và servo KNEE cho mỗi chân
 
-Nguyên tắc chung: **cả 2 servo của 1 chân có trục (shaft) SONG SONG nhau và ⟂ với hướng đi** — tức chân chỉ gập/duỗi trong **mặt phẳng dọc (sagittal)**. Horn của servo hip xoay *cả chân* ra trước/sau; horn của servo knee xoay *cẳng (tibia)* để gập/duỗi.
+Nguyên tắc chung (thiết kế **nhện** của bản build này):
 
-Nhìn từ bên hông (mặt phẳng bước đi, trục servo chĩa ra/vào trang giấy):
+- Servo **HIP có trục THẲNG ĐỨNG, chĩa XUỐNG** (đít servo hướng lên) ⇒ hip quay quanh trục **yaw**.
+- **Body là hình vuông, 4 trục hip nằm ở 4 ĐỈNH.**
+- **ARM của servo hip chĩa VÀO trung tâm body** (thanh arm nằm *phía dưới thân*, nên nhìn từ trên xuống gần như không thấy).
+- **CẲNG CHÂN (tibia) thì chĩa RA NGOÀI** — ở **neutral (90°) cẳng chân nằm đúng trên ĐƯỜNG CHÉO của hình vuông**, 4 chân tỏa ra 4 góc như con nhện (KHÔNG bao giờ chĩa vào thân). Bàn chân cách trục hip **R = 70 mm**.
+- Servo **KNEE có trục NGANG**, **gập cẳng lên/xuống** để nhấc/hạ bàn chân. Tibia (trục knee → mũi chân) = **60 mm**.
+
+Nhìn **từ trên xuống** (x = hướng robot đi; mũi tên = cẳng chân chĩa RA NGOÀI theo đường chéo):
 
 ```
-                    THÂN ROBOT
-        ═══════════════════════════════
-                 │
-        [HIP]  ●─┿─●   ← servo hip bắt vào thân
-                 ╲        trục servo ⟂ mặt phẳng này (chĩa ra ngoài hông)
-                  ╲
-                   ╲  FEMUR (đùi, 60 mm)
-                    ╲
-        [KNEE]       ●─┿─●  ← servo knee ở đầu dưới femur
-                        ╲      trục servo SONG SONG với servo hip
-                         ╲
-                          ╲  TIBIA (cẳng, 90 mm)
-                           ╲
-                            ▼  FOOT (bàn chân)
+        x ^ (robot đi)
+          |
+      ↖   |   ↗              ↖ ↗ ↙ ↘ = cẳng chân (RA NGOÀI, trên đường chéo body)
+   ┌──┴───┴───┴──┐           ● = trục hip yaw ở 4 đỉnh                 
+   │             │              (arm của servo chĩa VÀO trong, nằm dưới thân)
+   │ BODY VUÔNG  │           R = 70 mm: trục hip → mũi bàn chân ở neutral
+   │             │
+   └──┬───┬───┬──┘
+      ↙   |   ↘
+          |
 ```
 
-| Leg | Vị trí | Trục servo HIP | Trục servo KNEE | Kênh |
-|---|---|---|---|---|
-| **FL** trước-trái | góc trước bên trái | chĩa **sang trái** (ra ngoài) | chĩa **sang trái**, song song hip | **CH0 hip / CH1 knee** |
-| **FR** trước-phải | góc trước bên phải | chĩa **sang phải** (gương của FL) | chĩa **sang phải**, song song hip | **CH2 hip / CH3 knee** |
-| **RL** sau-trái | góc sau bên trái | như FL | như FL | **CH4 hip / CH5 knee** |
-| **RR** sau-phải | góc sau bên phải | như FR | như FR | **CH6 hip / CH7 knee** |
+Nhìn **từ bên (hoặc trước)** — chỉ servo KNEE (trục ngang, gập cẳng lên/xuống):
+
+```
+   [HIP] ●── arm (chĩa vào tâm body)
+          │
+          │  thanh nối / femur
+   [KNEE] ●────── trục NGANG → gập cẳng LÊN (nhấc chân) hoặc XUỐNG
+           ╲
+            ╲ tibia (60 mm)
+             ▼ FOOT  (cách trục hip R = 70 mm khi neutral)
+```
+
+Nhìn **từ bên (hoặc trước)** — servo KNEE trục ngang, gập cẳng lên/xuống:
+
+```
+   [HIP] ●── arm (chĩa vào tâm body)
+          │
+          │  femur / thanh nối
+   [KNEE] ●────── trục NGANG → gập cẳng LÊN (nhấc chân) hoặc XUỐNG
+           ╲
+            ╲ tibia
+             ▼ FOOT  (R = 70 mm từ trục hip khi neutral)
+```
+
+| Leg | Vị trí | Servo HIP | Servo KNEE | Kênh | Chiều |
+|---|---|---|---|---|---|
+| **FL** trước-trái | đỉnh trước-trái của body | trục **đứng, chĩa xuống**, arm chĩa vào tâm body | trục **ngang**, gập cẳng LÊN khi nhấc chân | **CH0 hip / CH1 knee** | mốc chuẩn |
+| **FR** trước-phải | đỉnh trước-phải | như FL (arm cũng vào tâm body) | như FL | **CH2 hip / CH3 knee** | **phải `invert`** (2, và 3 nếu gập sai chiều) |
+| **RL** sau-trái | đỉnh sau-trái | như FL | như FL | **CH4 hip / CH5 knee** | mốc chuẩn |
+| **RR** sau-phải | đỉnh sau-phải | như FR | như FR | **CH6 hip / CH7 knee** | **phải `invert`** (6, và 7 nếu gập sai chiều) |
 
 Quy tắc lắp:
 
-1. **Cùng hướng cả 4 chân**: hip quay quanh trục ngang, chân đưa ra trước/sau khi servo quay; knee quay quanh trục song song, cẳng gập vào khi servo quay.
-2. **Horn lắp ở vị trí 90°**: cấp servo về 90° (`self.servo.set joint=0 angle=90`) rồi mới bắt horn, sao cho chân đúng tư thế đứng (bàn chân nằm dưới trục hip, femur chếch ra trước, tibia chếch về sau). Sau đó chỉnh `self.servo.trim` cho vuông.
+1. **Hip = yaw**: quay servo hip làm **cả chân quét ngang** theo cung tròn bán kính R; vì neutral chân nằm trên đường chéo nên cung đó có **thành phần ra trước/sau** (nhờ đó robot đi được) và một thành phần **vào/ra** (bề ngang stance thay đổi — bình thường).
+2. **Horn lắp ở vị trí 90°**: cấp servo về 90° (`self.servo.set joint=0 angle=90`) rồi mới bắt horn, sao cho ở neutral **cẳng chân nằm đúng trên đường chéo body** và 4 bàn chân cách trục hip đúng **R = 70 mm**. Sau đó chỉnh `self.servo.trim` cho 4 chân đều nhau.
 3. **Dây (cable) của servo**: vì cổ dây nằm cùng phía với trục quay trên MG90S, hãy để **dây chạy về phía thân/femur** (không hướng ra ngoài) để khi khớp gập hết cỡ dây không bị căng/kẹt — và cố định dây vào femur/thân bằng keo tụt hoặc dây rút.
-4. **FR/RR là bản gương của FL/RL** về cơ khí, nhưng **firmware dùng cùng một công thức** cho cả 4 chân. Nếu chân bên phải chạy ngược chiều sau khi lắp, **đừng tháo ra** — dùng `self.servo.invert joint=<0..7> inverted=1`.
-5. Kiểm tra sau khi lắp: `self.gait.leg_test leg=0 foot_z=70` → `140` — servo hip **và** knee của riêng chân đó phải gập/duỗi cùng nhau, 3 chân kia đứng yên.
+4. **Bên phải là bản GƯƠNG của bên trái**: cùng một lệnh servo sẽ làm hip bên phải quét **ngược chiều** với bên trái (và knee bên phải gập ngược lên/xuống). Vì cả 4 trục hip đều chĩa xuống (cùng chiều trong không gian), **hip bên phải phải đảo chiều bằng phần mềm — đừng tháo cơ khí**:
+   ```
+   self.servo.invert joint=2 inverted=1     # hip chân 2 (FR)
+   self.servo.invert joint=6 inverted=1     # hip chân 4 (RR)
+   self.servo.invert joint=3 inverted=1     # knee chân 2 — chỉ khi nó gập XUỐNG thay vì LÊN
+   self.servo.invert joint=7 inverted=1     # knee chân 4 — chỉ khi nó gập XUỐNG thay vì LÊN
+   ```
+   Với bản build hiện tại, macro đã đặt sẵn `#define SERVO_INVERT_DEFAULT_MASK 0x44` (hip 2 và 6). Nếu knee phải cũng sai chiều thì đổi thành `0xCC`.
+5. Kiểm tra sau khi lắp: `self.gait.leg_sweep leg=0 hip_deg=40 knee_deg=40 duration_ms=2000` — riêng chân 1 quét ngang 40° và knee nhấc lên, 3 chân kia đứng yên. So 4 hip với nhau (`self.servo.raw_pulse joint=0|2|4|6 pulse_us=1200`) — **cả 4 phải quét cùng một hướng trong không gian**; so 4 knee (`joint=1|3|5|7 pulse_us=1800`) — **cả 4 phải nhấc bàn chân LÊN**.
 
-> **Lưu ý hình học:** với femur 60 mm / tibia 90 mm, tư thế đứng mặc định 95 mm làm chân gập khá sâu (femur chếch ~67° so với phương thẳng đứng, tibia chếch ~38° ngược lại). Nếu frame in của bạn trông khác, hãy đặt lại `LEG_FEMUR_MM`, `LEG_TIBIA_MM`, `BODY_STAND_HEIGHT_MM` (thường 115–125 mm cho cặp link này) trong `config.h` rồi tính lại.
+> **Lưu ý hình học (bản build nhện, hip = yaw):** bàn chân chạy trên cung tròn bán kính **R = 70 mm** quanh trục hip, và vì neutral nằm trên đường chéo nên **thành phần đi tới/lùi mỗi bước ≈ √2 · R · sin(Δ/2)**:
+>
+> | Δ hip | Bàn chân đi tới/lùi mỗi bước |
+> |---|---|
+> | 20° | 17 mm |
+> | 30° | 26 mm |
+> | 40° | 34 mm (mặc định đi trên sàn) |
+> | 60° | 50 mm |
+> | 120° | 86 mm (chỉ test trên kệ) |
+>
+> **Độ nhấc chân theo góc gập knee** (tibia **60 mm**, α ≈ góc cẳng chân dưới phương ngang ở neutral): nhấc ≈ `60 · (sin(α+Δ) − sin(α))` ⇒ khoảng **20° ≈ 7 mm, 30° ≈ 15 mm, 40° ≈ 17 mm**. Mặc định firmware: `GAIT_JOINT_KNEE_TRAVEL_DEG 30` (~15 mm, đủ nhấc chân mà không cần gập sâu).
+>
+> Chiều cao body trong gait joint-space do **độ gập knee** quyết định (`self.gait.stand/sit/body` dùng `GAIT_JOINT_CROUCH_DEG_PER_MM ≈ 1.3 °/mm`), còn hip luôn giữ trên đường chéo. Đường IK (`RunWalk`, `LEG_FEMUR_MM`/`LEG_TIBIA_MM`, `BODY_STAND_HEIGHT_MM`) giả định kiểu Otto (hip/knee cùng gập trong mặt phẳng dọc) nên **không dùng cho robot này**. Muốn test biên độ lớn trên kệ: `self.gait.walk steps=1 step_ms=1400 hip_deg=120 knee_deg=60`.
 
 ---
 

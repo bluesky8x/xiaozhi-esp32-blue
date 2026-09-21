@@ -8,9 +8,13 @@
 #include "boards/blue-v2/config.h"
 #elif CONFIG_BOARD_TYPE_BLUE_V3
 #include "boards/blue-v3/config.h"
+#elif CONFIG_BOARD_TYPE_BLUE_V4
+#include "boards/blue-v4/config.h"
 #endif
 #if CONFIG_BOARD_TYPE_BLUE_V2 || CONFIG_BOARD_TYPE_BLUE_V3
 #include "boards/blue-v2/blue_cloud_guard.h"
+#elif CONFIG_BOARD_TYPE_BLUE_V4
+#include "boards/blue-v4/blue_v4_cloud_guard.h"
 #endif
 
 #include <freertos/FreeRTOS.h>
@@ -90,7 +94,7 @@ Ota::~Ota() {
 std::string Ota::GetCheckVersionUrl() {
     Settings settings("wifi", false);
     std::string url = settings.GetString("ota_url");
-#if (CONFIG_BOARD_TYPE_BLUE_V2 || CONFIG_BOARD_TYPE_BLUE_V3) && BLUE_BLOCK_CLOUD_SERVERS
+#if (CONFIG_BOARD_TYPE_BLUE_V2 || CONFIG_BOARD_TYPE_BLUE_V3 || CONFIG_BOARD_TYPE_BLUE_V4) && BLUE_BLOCK_CLOUD_SERVERS
     if (url.empty()) {
         ESP_LOGE(TAG, "OTA URL not set — configure in WiFi portal (Advanced)");
         return "";

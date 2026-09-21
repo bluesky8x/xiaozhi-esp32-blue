@@ -31,6 +31,27 @@ constexpr float kDegToRad = 0.017453292f;
 constexpr BlueV4Leg kCrawlOrder[4] = {BlueV4Leg::kFrontRight, BlueV4Leg::kRearLeft,
                                       BlueV4Leg::kFrontLeft, BlueV4Leg::kRearRight};
 
+// Phase times of ONE leg inside a crawl step, in milliseconds. The phases run one after the
+// other, so the real crawl-step time is the sum below x 4 legs.
+struct JointPhaseMs {
+    int lift;
+    int swing;
+    int plant;
+    int push;
+};
+
+JointPhaseMs JointPhases(int step_ms) {
+    const int ms = std::clamp(step_ms, 200, 6000);
+    JointPhaseMs p;
+    p.swing = std::max(ms, 300);
+    p.push = p.swing;
+    p.lift = std::max(ms / 2, 200);
+    // The knee descends slower than it lifts: dropping it fast made the loaded servo lag, so the
+    // hip push started while the foot was still in the air.
+    p.plant = std::max(static_cast<int>(p.lift * GAIT_JOINT_PLANT_SLOWDOWN), 300);
+    return p;
+}
+
 // Foot lift while swinging (keeps the foot clear of the ground).
 constexpr float kSwingLiftMm = 14.0f;
 
@@ -128,12 +149,15 @@ bool GaitEngine::EnqueueStop() {
     return Enqueue(cmd);
 }
 
-bool GaitEngine::EnqueueWalk(const std::string& direction, int steps, int stride_mm, int step_ms) {
+bool GaitEngine::EnqueueWalk(const std::string& direction, int steps, int stride_mm, int step_ms,
+                             int hip_deg, int knee_deg) {
     Cmd cmd;
     cmd.type = CmdType::kWalk;
     cmd.a = steps;
     cmd.b = stride_mm;
     cmd.c = step_ms;
+    cmd.e = hip_deg;
+    cmd.f = knee_deg;
     cmd.sign = direction == "-1" ? -1 : 1;
     return Enqueue(cmd);
 }
@@ -256,6 +280,119 @@ void GaitEngine::PublishLegs(const LegState legs[4], float body_height_mm, float
     servos_->SetTargets(angles);
 }
 
+void GaitEngine::WaitForSettle(int timeout_ms) {
+    // 20 ms granularity matches SERVO_UPDATE_PERIOD_MS.
+    for (int waited = 0; waited < timeout_ms; waited += SERVO_UPDATE_PERIOD_MS) {
+        vTaskDelay(pdMS_TO_TICKS(SERVO_UPDATE_PERIOD_MS));
+        if (!servos_->IsMoving()) {
+            return;
+        }
+    }
+    ESP_LOGW(TAG, "servo settle timeout (%d ms)", timeout_ms);
+}
+
+bool GaitEngine::RampJoints(const float from[SERVO_COUNT], const float to[SERVO_COUNT],
+                            int duration_ms) {
+    duration_ms = std::max(duration_ms, SERVO_UPDATE_PERIOD_MS * 2);
+
+    float max_travel = 0.0f;
+    for (int i = 0; i < SERVO_COUNT; i++) {
+        max_travel = std::max(max_travel, fabsf(to[i] - from[i]));
+    }
+    if (max_travel < 0.1f) {
+        servos_->SetTargets(to);
+        vTaskDelay(pdMS_TO_TICKS(SERVO_UPDATE_PERIOD_MS));
+        return !cancel_.load();
+    }
+
+    // Smoothstep peaks at 1.5x the average rate; give the servo limiter ~2x plus a fast ramp so it
+    // can follow the curve instead of lagging behind it (a lag would shorten the real travel).
+    const float avg_rate = max_travel * 1000.0f / static_cast<float>(duration_ms);
+    const float slew = std::clamp(avg_rate * 2.0f, 40.0f, 400.0f);
+    servos_->SetSlewDegPerSec(slew);
+    servos_->SetAccelDegPerSec2(std::max(400.0f, slew * 5.0f));
+
+    const int ticks = std::max(duration_ms / SERVO_UPDATE_PERIOD_MS, 2);
+    for (int t = 1; t <= ticks; t++) {
+        if (cancel_.load()) {
+            return false;
+        }
+        const float x = static_cast<float>(t) / static_cast<float>(ticks);
+        const float k = x * x * (3.0f - 2.0f * x);  // smooth start/stop, no overshoot
+        float angles[SERVO_COUNT];
+        for (int i = 0; i < SERVO_COUNT; i++) {
+            angles[i] = from[i] + (to[i] - from[i]) * k;
+        }
+        servos_->SetTargets(angles);
+        vTaskDelay(pdMS_TO_TICKS(SERVO_UPDATE_PERIOD_MS));
+    }
+    servos_->SetTargets(to);  // land exactly on the target
+    return !cancel_.load();
+}
+
+int GaitEngine::JointCrawlCycleMs(int step_ms) {
+    const JointPhaseMs p = JointPhases(step_ms);
+    const int per_leg = p.lift + GAIT_JOINT_LIFT_DWELL_MS + p.swing + p.plant +
+                        GAIT_JOINT_PLANT_DWELL_MS + p.push;
+    return per_leg * 4;
+}
+
+bool GaitEngine::WaitForJointsSettled(int min_ms, int timeout_ms) {
+    // RampJoints drives the *commanded* curve on schedule; the servo (heavily loaded on the
+    // support legs) reaches the position later. Give the joint time to really get there before
+    // the next phase starts — otherwise the hips rotate back while the foot is still airborne.
+    const int64_t start_us = esp_timer_get_time();
+    while (!cancel_.load()) {
+        const int elapsed_ms = static_cast<int>((esp_timer_get_time() - start_us) / 1000);
+        if (elapsed_ms >= min_ms && !servos_->IsMoving()) {
+            return true;
+        }
+        if (elapsed_ms >= timeout_ms) {
+            return true;  // safety: never block the gait forever
+        }
+        vTaskDelay(pdMS_TO_TICKS(SERVO_UPDATE_PERIOD_MS));
+    }
+    return false;
+}
+
+std::string GaitEngine::ApplyJointPosture(int height_mm, int pitch_deg, int roll_deg) {
+    // Spider geometry: every hip stays at neutral (legs on the body diagonal) and the body height
+    // comes from how much the knees fold — more fold = lower body. Pitch/roll bias the fold per
+    // leg, so the legs on the "low" side fold more and the body tilts.
+    const float crouch =
+        (BODY_STAND_HEIGHT_MM - static_cast<float>(height_mm)) * GAIT_JOINT_CROUCH_DEG_PER_MM;
+    const float pitch =
+        std::clamp(static_cast<float>(pitch_deg), -20.0f, 20.0f) * GAIT_JOINT_TILT_DEG_PER_DEG;
+    const float roll =
+        std::clamp(static_cast<float>(roll_deg), -20.0f, 20.0f) * GAIT_JOINT_TILT_DEG_PER_DEG;
+
+    float from[SERVO_COUNT];
+    float next[SERVO_COUNT];
+    servos_->GetCommandedAngles(from);
+    for (int i = 0; i < SERVO_COUNT; i++) {
+        next[i] = from[i];
+    }
+    for (int leg = 0; leg < 4; leg++) {
+        const bool is_front = (leg == static_cast<int>(BlueV4Leg::kFrontLeft) ||
+                               leg == static_cast<int>(BlueV4Leg::kFrontRight));
+        const bool is_left = (leg == static_cast<int>(BlueV4Leg::kFrontLeft) ||
+                              leg == static_cast<int>(BlueV4Leg::kRearLeft));
+        const float bias = (is_front ? pitch : -pitch) + (is_left ? roll : -roll);
+        next[leg * 2] = SERVO_DEFAULT_NEUTRAL_DEG;
+        next[leg * 2 + 1] = SERVO_DEFAULT_NEUTRAL_DEG + crouch + bias;
+    }
+
+    servos_->EnableOutputs();
+    servos_->SetHold(true);
+    if (!RampJoints(from, next, 900)) {
+        return "cancelled";
+    }
+    body_height_mm_ = static_cast<float>(height_mm);
+    pitch_deg_ = static_cast<float>(pitch_deg);
+    roll_deg_ = static_cast<float>(roll_deg);
+    return "posture set";
+}
+
 void GaitEngine::ApplyPose(float height_mm, float pitch_deg, float roll_deg) {
     body_height_mm_ = std::clamp(height_mm, BODY_MIN_HEIGHT_MM, BODY_MAX_HEIGHT_MM);
     pitch_deg_ = std::clamp(pitch_deg, -20.0f, 20.0f);
@@ -277,73 +414,123 @@ void GaitEngine::ApplyRelax() {
     servos_->Relax();
 }
 
-std::string GaitEngine::RunWalkJoint(int steps, int step_ms, int8_t sign) {
-    // Joint-space crawl. Hip sweeps hip_center +/- HIP_TRAVEL/2 (=> a full HIP_TRAVEL of
-    // travel per step) and the knee folds by KNEE_TRAVEL while the leg swings. All four
-    // hips then push back a quarter travel, so each leg returns to its start angle and the
-    // robot advances without drifting.
+std::string GaitEngine::RunWalkJoint(int steps, int step_ms, int8_t sign, float hip_travel_deg,
+                                     float knee_travel_deg) {
+    // Joint-space crawl for a spider-style leg: the hip servo is a VERTICAL yaw axis (its arm
+    // points to the body centre and the leg points outward), so the hip sweeps the foot fore/aft,
+    // and the knee (horizontal axis) folds the tibia up to lift the foot.
+    //
+    // Phase order per leg (exactly as specified by the user):
+    //   0. start from the neutral point (all joints at SERVO_DEFAULT_NEUTRAL_DEG)
+    //   1. KNEE lifts — the foot leaves the floor
+    //   2. HIP sweeps forward (yaw, counter-clockwise seen from above)
+    //   3. KNEE lowers back to the floor and the foot is planted
+    //   4. only THEN do all four hips rotate back together (the planted feet push the body)
+    // Every phase is a timed smoothstep ramp followed by a settle dwell, so the yaw never returns
+    // while the foot is still in the air. Foot travel per step is about 2 * R * sin(hip_travel/2)
+    // (R = 70 mm on this build), so keep the hip travel small (30-45 deg) on the floor and use
+    // bigger values only on the bench.
     steps = std::clamp(steps, 1, 12);
     step_ms = std::clamp(step_ms, 200, 6000);
 
-    const float hip_center = GAIT_JOINT_HIP_NEUTRAL_DEG;
-    const float hip_half = GAIT_JOINT_HIP_TRAVEL_DEG * 0.5f;
-    const float knee_fold = GAIT_JOINT_KNEE_TRAVEL_DEG;
-    const float push = GAIT_JOINT_HIP_TRAVEL_DEG / 4.0f;
+    const float center = GAIT_JOINT_HIP_NEUTRAL_DEG;
+    const float half = std::clamp(hip_travel_deg, 0.0f, 170.0f) * 0.5f;
+    // GAIT_JOINT_FORWARD_SIGN mirrors the whole sweep: flip it (config.h) when the robot walks
+    // backwards for direction=+1 — the cycle is unchanged, only the hip yaw sense flips.
+    const float sense = static_cast<float>(sign) * GAIT_JOINT_FORWARD_SIGN;
+    const float hip_forward = center + half * sense;
+    const float hip_back = center - half * sense;
+    const float knee_fold = std::clamp(knee_travel_deg, 0.0f, 90.0f);
 
-    // Local source of truth for the joint targets (mount neutral = 90 deg).
-    float angles[SERVO_COUNT];
-    for (int i = 0; i < SERVO_COUNT; i++) {
-        angles[i] = 90.0f;
-    }
-    for (int leg = 0; leg < 4; leg++) {
-        angles[leg * 2] = hip_center;
-    }
+    // step_ms is the time of the biggest move (the full hip sweep); the knee phases take half.
+    const JointPhaseMs phase = JointPhases(step_ms);
+    const int swing_ms = phase.swing;
+    const int push_ms = phase.push;
+    const int lift_ms = phase.lift;
+    const int plant_ms = phase.plant;
 
     servos_->EnableOutputs();
     servos_->SetHold(true);
-    servos_->SetTargets(angles);
-    vTaskDelay(pdMS_TO_TICKS(static_cast<uint32_t>(step_ms)));
 
-    const int quarter = std::max(step_ms / 4, 100);
+    float from[SERVO_COUNT];
+    float next[SERVO_COUNT];
+    servos_->GetCommandedAngles(from);
+    for (int i = 0; i < SERVO_COUNT; i++) {
+        next[i] = from[i];
+    }
+    auto commit = [&from, &next]() {
+        for (int i = 0; i < SERVO_COUNT; i++) {
+            from[i] = next[i];
+        }
+    };
+
+    // Stand up straight first, then park every hip at the rear extreme so even the first swing is
+    // a full travel.
+    for (int i = 0; i < SERVO_COUNT; i++) {
+        next[i] = SERVO_DEFAULT_NEUTRAL_DEG;
+    }
+    if (!RampJoints(from, next, std::max(swing_ms, 500))) {
+        return "cancelled";
+    }
+    commit();
+    for (int leg = 0; leg < 4; leg++) {
+        next[leg * 2] = hip_back;
+    }
+    if (!RampJoints(from, next, push_ms)) {
+        return "cancelled";
+    }
+    commit();
+
     for (int step = 0; step < steps; step++) {
         for (int index = 0; index < 4; index++) {
-            if (cancel_.load()) {
-                return "cancelled";
-            }
             const int leg = static_cast<int>(kCrawlOrder[index]);
             const int hip = leg * 2;
             const int knee = hip + 1;
 
-            // 1) Fold the knee (lift the foot clear).
-            angles[knee] = 90.0f + knee_fold;
-            servos_->SetTargets(angles);
-            vTaskDelay(pdMS_TO_TICKS(quarter));
-
-            // 2) Swing the hip across the full travel.
-            angles[hip] = hip_center + hip_half * static_cast<float>(sign);
-            servos_->SetTargets(angles);
-            vTaskDelay(pdMS_TO_TICKS(quarter * 2));
-
-            // 3) Plant.
-            angles[knee] = 90.0f;
-            servos_->SetTargets(angles);
-            vTaskDelay(pdMS_TO_TICKS(quarter));
-
-            // 4) Body advance: every hip pushes back a quarter travel.
-            if (!cancel_.load()) {
-                for (int l = 0; l < 4; l++) {
-                    angles[l * 2] -= push * static_cast<float>(sign);
-                }
-                servos_->SetTargets(angles);
+            // 1) Fold the knee so the foot clears the ground.
+            next[knee] = SERVO_DEFAULT_NEUTRAL_DEG + knee_fold;
+            if (!RampJoints(from, next, lift_ms)) {
+                return "cancelled";
             }
+            commit();
+            // Let the foot really leave the ground before the hip sweeps it forward.
+            if (!WaitForJointsSettled(GAIT_JOINT_LIFT_DWELL_MS, GAIT_JOINT_SETTLE_TIMEOUT_MS)) {
+                return "cancelled";
+            }
+
+            // 2) Sweep the hip across the whole travel.
+            next[hip] = hip_forward;
+            if (!RampJoints(from, next, swing_ms)) {
+                return "cancelled";
+            }
+            commit();
+
+            // 3) Plant the foot again — and do NOT let any hip move until it is really down.
+            next[knee] = SERVO_DEFAULT_NEUTRAL_DEG;
+            if (!RampJoints(from, next, plant_ms)) {
+                return "cancelled";
+            }
+            commit();
+            if (!WaitForJointsSettled(GAIT_JOINT_PLANT_DWELL_MS, GAIT_JOINT_SETTLE_TIMEOUT_MS)) {
+                return "cancelled";
+            }
+
+            // 4) Body advance: all four hips rotate back together (the feet stay planted).
+            for (int l = 0; l < 4; l++) {
+                next[l * 2] = hip_back;
+            }
+            if (!RampJoints(from, next, push_ms)) {
+                return "cancelled";
+            }
+            commit();
         }
     }
 
-    // Finish standing even with every joint back at its mount neutral.
+    // Finish standing with every joint back at the mount neutral.
     for (int i = 0; i < SERVO_COUNT; i++) {
-        angles[i] = 90.0f;
+        next[i] = SERVO_DEFAULT_NEUTRAL_DEG;
     }
-    servos_->SetTargets(angles);
+    RampJoints(from, next, swing_ms);
     return cancel_.load() ? "cancelled" : "walk complete";
 }
 
@@ -353,100 +540,100 @@ std::string GaitEngine::RunLegSweep(int leg, int hip_deg, int knee_deg, int dura
     const int total_ms = std::clamp(duration_ms, 1000, 15000);
     const float hip_travel = std::clamp(static_cast<float>(hip_deg), 10.0f, 170.0f);
     const float knee_travel = std::clamp(static_cast<float>(knee_deg), 0.0f, 90.0f);
-
-    // Shape the speed so the largest move takes (about) the requested duration.
-    const float travel = std::max(hip_travel, knee_travel);
-    const float slew = std::max(5.0f, travel / (static_cast<float>(total_ms) / 1000.0f));
-    servos_->SetSlewDegPerSec(slew);
-    servos_->SetAccelDegPerSec2(std::max(30.0f, slew * 2.0f));
-
-    float angles[SERVO_COUNT];
-    servos_->GetCommandedAngles(angles);
-    const float hip_start = 90.0f;
-    const float knee_start = 90.0f;
-    const int segment = std::max(total_ms / 3, 200);
+    const int phase_ms = std::max(total_ms / 3, 300);
 
     servos_->EnableOutputs();
     servos_->SetHold(true);
 
-    // 1) Fold the knee + move the hip half travel forward.
-    angles[hip_joint] = hip_start + hip_travel * 0.5f;
-    angles[knee_joint] = knee_start + knee_travel;
-    servos_->SetTargets(angles);
-    vTaskDelay(pdMS_TO_TICKS(segment));
-    if (cancel_.load()) {
+    float from[SERVO_COUNT];
+    float next[SERVO_COUNT];
+    servos_->GetCommandedAngles(from);
+    for (int i = 0; i < SERVO_COUNT; i++) {
+        next[i] = from[i];
+    }
+    auto commit = [&from, &next]() {
+        for (int i = 0; i < SERVO_COUNT; i++) {
+            from[i] = next[i];
+        }
+    };
+
+    // 1) Fold the knee and move the hip half a travel forward.
+    next[hip_joint] = 90.0f + hip_travel * 0.5f;
+    next[knee_joint] = 90.0f + knee_travel;
+    if (!RampJoints(from, next, phase_ms)) {
         return "cancelled";
     }
+    commit();
 
-    // 2) Sweep the hip to the other end of the travel.
-    angles[hip_joint] = hip_start - hip_travel * 0.5f;
-    servos_->SetTargets(angles);
-    vTaskDelay(pdMS_TO_TICKS(segment));
-    if (cancel_.load()) {
+    // 2) Sweep the hip to the other end of the travel (a full hip_travel).
+    next[hip_joint] = 90.0f - hip_travel * 0.5f;
+    if (!RampJoints(from, next, phase_ms)) {
         return "cancelled";
     }
+    commit();
 
-    // 3) Return to neutral.
-    angles[hip_joint] = hip_start;
-    angles[knee_joint] = knee_start;
-    servos_->SetTargets(angles);
-    vTaskDelay(pdMS_TO_TICKS(segment));
+    // 3) Return to the neutral point.
+    next[hip_joint] = 90.0f;
+    next[knee_joint] = 90.0f;
+    RampJoints(from, next, phase_ms);
 
-    // Restore the default motion profile.
+    // Restore the default motion profile for later commands.
     servos_->SetSlewDegPerSec(SERVO_SLEW_DEG_PER_SEC);
     servos_->SetAccelDegPerSec2(SERVO_ACCEL_DEG_PER_SEC2);
     return cancel_.load() ? "cancelled" : "sweep complete";
 }
-const float stride = std::clamp(static_cast<float>(stride_mm), 10.0f, 60.0f);
-steps = std::clamp(steps, 1, 12);
-step_ms = std::clamp(step_ms, 200, 1500);
 
-servos_->EnableOutputs();
-servos_->SetHold(true);
-ApplyPose(body_height_mm_, pitch_deg_, roll_deg_);
-vTaskDelay(pdMS_TO_TICKS(static_cast<uint32_t>(step_ms)));
+std::string GaitEngine::RunWalk(int steps, int stride_mm, int step_ms, int8_t sign) {
+    const float stride = std::clamp(static_cast<float>(stride_mm), 10.0f, 60.0f);
+    steps = std::clamp(steps, 1, 12);
+    step_ms = std::clamp(step_ms, 200, 1500);
 
-for (int step = 0; step < steps; step++) {
-    for (int leg_index = 0; leg_index < 4; leg_index++) {
-        if (cancel_.load()) {
-            return "cancelled";
-        }
-        const int leg = static_cast<int>(kCrawlOrder[leg_index]);
-        const int half = std::max(step_ms / 4, 40);
+    servos_->EnableOutputs();
+    servos_->SetHold(true);
+    ApplyPose(body_height_mm_, pitch_deg_, roll_deg_);
+    vTaskDelay(pdMS_TO_TICKS(static_cast<uint32_t>(step_ms)));
 
-        // 1) Lift
-        legs_[leg].lift_mm = kSwingLiftMm;
-        PublishLegs(legs_, body_height_mm_, pitch_deg_, roll_deg_);
-        vTaskDelay(pdMS_TO_TICKS(half));
-
-        // 2) Swing forward (or backward)
-        legs_[leg].foot_x_mm += stride * static_cast<float>(sign);
-        PublishLegs(legs_, body_height_mm_, pitch_deg_, roll_deg_);
-        vTaskDelay(pdMS_TO_TICKS(half * 2));
-
-        // 3) Plant
-        legs_[leg].lift_mm = 0.0f;
-        PublishLegs(legs_, body_height_mm_, pitch_deg_, roll_deg_);
-        vTaskDelay(pdMS_TO_TICKS(half));
-
-        // 4) The three planted legs push back by stride/4: net body advance is
-        //    one stride after all four legs have cycled.
-        if (!cancel_.load()) {
-            for (auto& planted : legs_) {
-                planted.foot_x_mm -= stride * 0.25f * static_cast<float>(sign);
+    for (int step = 0; step < steps; step++) {
+        for (int leg_index = 0; leg_index < 4; leg_index++) {
+            if (cancel_.load()) {
+                return "cancelled";
             }
+            const int leg = static_cast<int>(kCrawlOrder[leg_index]);
+            const int half = std::max(step_ms / 4, 40);
+
+            // 1) Lift
+            legs_[leg].lift_mm = kSwingLiftMm;
             PublishLegs(legs_, body_height_mm_, pitch_deg_, roll_deg_);
+            vTaskDelay(pdMS_TO_TICKS(half));
+
+            // 2) Swing forward (or backward)
+            legs_[leg].foot_x_mm += stride * static_cast<float>(sign);
+            PublishLegs(legs_, body_height_mm_, pitch_deg_, roll_deg_);
+            vTaskDelay(pdMS_TO_TICKS(half * 2));
+
+            // 3) Plant
+            legs_[leg].lift_mm = 0.0f;
+            PublishLegs(legs_, body_height_mm_, pitch_deg_, roll_deg_);
+            vTaskDelay(pdMS_TO_TICKS(half));
+
+            // 4) The three planted legs push back by stride/4: net body advance is
+            //    one stride after all four legs have cycled.
+            if (!cancel_.load()) {
+                for (auto& planted : legs_) {
+                    planted.foot_x_mm -= stride * 0.25f * static_cast<float>(sign);
+                }
+                PublishLegs(legs_, body_height_mm_, pitch_deg_, roll_deg_);
+            }
         }
     }
-}
 
-// Re-centre the feet for the next command.
-for (auto& leg : legs_) {
-    leg.foot_x_mm = 0.0f;
-    leg.lift_mm = 0.0f;
-}
-PublishLegs(legs_, body_height_mm_, pitch_deg_, roll_deg_);
-return cancel_.load() ? "cancelled" : "walk complete";
+    // Re-centre the feet for the next command.
+    for (auto& leg : legs_) {
+        leg.foot_x_mm = 0.0f;
+        leg.lift_mm = 0.0f;
+    }
+    PublishLegs(legs_, body_height_mm_, pitch_deg_, roll_deg_);
+    return cancel_.load() ? "cancelled" : "walk complete";
 }
 
 std::string GaitEngine::RunTurn(int steps, int step_ms, int8_t sign) {
@@ -592,17 +779,31 @@ void GaitEngine::RunCommand(const Cmd& cmd) {
             const float height = cmd.a > 0 ? static_cast<float>(cmd.a) : BODY_STAND_HEIGHT_MM;
             servos_->EnableOutputs();
             servos_->SetHold(true);
+#if BLUE_V4_JOINT_SPACE_GAIT
+            const std::string result = ApplyJointPosture(static_cast<int>(height), 0, 0);
+#else
             ApplyPose(height, 0.0f, 0.0f);
-            ESP_LOGI(TAG, "stand at %.0f mm", static_cast<double>(body_height_mm_));
+            const std::string result = "stand";
+#endif
+            ESP_LOGI(TAG, "stand at %.0f mm (%s)", static_cast<double>(body_height_mm_),
+                     result.c_str());
             break;
         }
         case CmdType::kSit: {
             cancel_.store(false);
             servos_->EnableOutputs();
             servos_->SetHold(true);
+#if BLUE_V4_JOINT_SPACE_GAIT
+            // Crouch right down: fold every knee hard, hips stay on the diagonal.
+            const std::string result =
+                ApplyJointPosture(static_cast<int>(BODY_MIN_HEIGHT_MM), 0, 0);
+#else
             // Fold down and tilt forward — the classic relaxed sit for 2-DoF legs.
             ApplyPose(BODY_MIN_HEIGHT_MM, 12.0f, 0.0f);
-            ESP_LOGI(TAG, "sit (height %.0f mm)", static_cast<double>(body_height_mm_));
+            const std::string result = "sit";
+#endif
+            ESP_LOGI(TAG, "sit (height %.0f mm, %s)", static_cast<double>(body_height_mm_),
+                     result.c_str());
             break;
         }
         case CmdType::kRelax:
@@ -620,9 +821,15 @@ void GaitEngine::RunCommand(const Cmd& cmd) {
             servos_->EnableOutputs();
             servos_->SetHold(true);
             const float height = cmd.a > 0 ? static_cast<float>(cmd.a) : BODY_STAND_HEIGHT_MM;
+#if BLUE_V4_JOINT_SPACE_GAIT
+            const std::string result = ApplyJointPosture(static_cast<int>(height), cmd.b, cmd.c);
+#else
             ApplyPose(height, static_cast<float>(cmd.b), static_cast<float>(cmd.c));
-            ESP_LOGI(TAG, "body %.0f mm pitch %.0f roll %.0f", static_cast<double>(body_height_mm_),
-                     static_cast<double>(pitch_deg_), static_cast<double>(roll_deg_));
+            const std::string result = "body";
+#endif
+            ESP_LOGI(TAG, "body %.0f mm pitch %.0f roll %.0f (%s)",
+                     static_cast<double>(body_height_mm_), static_cast<double>(pitch_deg_),
+                     static_cast<double>(roll_deg_), result.c_str());
             break;
         }
         case CmdType::kWalk: {
@@ -630,7 +837,12 @@ void GaitEngine::RunCommand(const Cmd& cmd) {
             busy_.store(true);
 #if BLUE_V4_JOINT_SPACE_GAIT
             const int joint_step_ms = cmd.c > 0 ? cmd.c : GAIT_JOINT_STEP_MS;
-            const std::string result = RunWalkJoint(cmd.a, joint_step_ms, cmd.sign);
+            const float hip_travel =
+                cmd.e > 0 ? static_cast<float>(cmd.e) : GAIT_JOINT_HIP_TRAVEL_DEG;
+            const float knee_travel =
+                cmd.f > 0 ? static_cast<float>(cmd.f) : GAIT_JOINT_KNEE_TRAVEL_DEG;
+            const std::string result =
+                RunWalkJoint(cmd.a, joint_step_ms, cmd.sign, hip_travel, knee_travel);
 #else
             const std::string result = RunWalk(cmd.a, cmd.b, cmd.c, cmd.sign);
 #endif
@@ -741,20 +953,27 @@ void GaitEngine::RegisterMcpTools() {
                 });
 
     mcp.AddTool("self.gait.walk",
-                "Crawl-gait walk. direction: 1 = forward, -1 = backward. steps 1-8, "
-                "stride_mm 10-60, step_ms is the time per leg cycle (larger = slower and "
-                "gentler on the power rail). One leg moves at a time, so the robot stays "
-                "statically stable.",
+                "Crawl-gait walk. direction: 1 = forward, -1 = backward. steps 1-8, stride_mm "
+                "10-60, step_ms is the time per leg cycle (larger = slower and gentler on the "
+                "power rail). One leg moves at a time, so the robot stays statically stable. "
+                "hip_deg/knee_deg override the travel for this call (0 = firmware default); on "
+                "the bench you can use hip_deg=120 knee_deg=60 to inspect the full travel, but "
+                "keep 30-45 deg when walking on the floor.",
                 PropertyList({Property("direction", kPropertyTypeInteger, 1, -1, 1),
                               Property("steps", kPropertyTypeInteger, 1, 1, 8),
                               Property("stride_mm", kPropertyTypeInteger, 40, 10, 60),
-                              Property("step_ms", kPropertyTypeInteger, 420, 200, 1500)}),
+                              Property("step_ms", kPropertyTypeInteger, 350, 200, 1500),
+                              Property("hip_deg", kPropertyTypeInteger, 0, 0, 170),
+                              Property("knee_deg", kPropertyTypeInteger, 0, 0, 90)}),
                 [this](const PropertyList& properties) -> ReturnValue {
                     const int dir = properties["direction"].value<int>();
                     const int steps = properties["steps"].value<int>();
                     const int stride = properties["stride_mm"].value<int>();
                     const int step_ms = properties["step_ms"].value<int>();
-                    return EnqueueWalk(std::to_string(dir), steps, stride, step_ms)
+                    const int hip_deg = properties["hip_deg"].value<int>();
+                    const int knee_deg = properties["knee_deg"].value<int>();
+                    return EnqueueWalk(std::to_string(dir), steps, stride, step_ms, hip_deg,
+                                       knee_deg)
                                ? std::string("walk started")
                                : std::string("error: busy with another motion");
                 });
@@ -764,7 +983,7 @@ void GaitEngine::RegisterMcpTools() {
                 "-1 = the other. steps 1-8, step_ms per leg cycle.",
                 PropertyList({Property("direction", kPropertyTypeInteger, 1, -1, 1),
                               Property("steps", kPropertyTypeInteger, 1, 1, 8),
-                              Property("step_ms", kPropertyTypeInteger, 420, 200, 1500)}),
+                              Property("step_ms", kPropertyTypeInteger, 350, 200, 1500)}),
                 [this](const PropertyList& properties) -> ReturnValue {
                     const int dir = properties["direction"].value<int>();
                     const int steps = properties["steps"].value<int>();

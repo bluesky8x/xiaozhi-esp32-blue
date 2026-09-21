@@ -2,6 +2,8 @@
 
 #if CONFIG_BOARD_TYPE_BLUE_V2
 #include "motor_controller.h"
+#elif CONFIG_BOARD_TYPE_BLUE_V4
+#include "servo_controller.h"
 #endif
 #include <esp_log.h>
 #include <cstring>
@@ -543,6 +545,13 @@ void AudioService::SetDecodeSampleRate(int sample_rate, int frame_duration) {
 void AudioService::PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t>&& pcm) {
 #if CONFIG_BOARD_TYPE_BLUE_V2
     if (type == kAudioTaskTypeEncodeToSendQueue && MotorController::ShouldPauseUplink()) {
+        return;
+    }
+#elif CONFIG_BOARD_TYPE_BLUE_V4
+    // Same idea as the blue-v2 motor pause: servo whine/EMI while the legs move would
+    // otherwise dominate the uplink. ServoController::ShouldPauseUplink() is compiled in
+    // as a no-op when BLUE_V4_PAUSE_UPLINK_WHILE_MOVING is 0.
+    if (type == kAudioTaskTypeEncodeToSendQueue && ServoController::ShouldPauseUplink()) {
         return;
     }
 #endif

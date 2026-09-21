@@ -19,6 +19,8 @@ constexpr int kTaskStackWords = 4096;
 constexpr UBaseType_t kTaskPriority = 4;
 // Ignore sub-tick jitter when deciding whether a channel needs an I2C write.
 constexpr int kMinTickDeltaToWrite = 1;
+// Logical joint -> PCA9685 channel (see SERVO_CHANNEL_MAP in config.h).
+constexpr uint8_t kJointChannel[SERVO_COUNT] = SERVO_CHANNEL_MAP;
 }  // namespace
 
 ServoController* ServoController::instance_ = nullptr;
@@ -62,6 +64,10 @@ bool ServoController::Init(i2c_master_bus_handle_t bus) {
     relaxed_ = true;
     ready_ = true;
 
+#if SERVO_BOOT_NEUTRAL_ENABLE
+    StartBootNeutral(SERVO_BOOT_NEUTRAL_DELAY_MS);
+#endif
+
     RegisterMcpTools();
     ESP_LOGI(TAG, "ready (%d joints, %d Hz, %d us update, slew %.0f deg/s, hardware=%d)",
              SERVO_COUNT, SERVO_PWM_FREQ_HZ, SERVO_UPDATE_PERIOD_MS,
@@ -80,14 +86,28 @@ void ServoController::RegisterJointLimits() {
 
 void ServoController::LoadTrims() {
     Settings settings(kNvsNamespace, false);
+    min_pulse_us_ = static_cast<uint16_t>(
+        std::clamp<int32_t>(settings.GetInt("pmin", SERVO_MIN_PULSE_US), 200, 2500));
+    max_pulse_us_ = static_cast<uint16_t>(
+        std::clamp<int32_t>(settings.GetInt("pmax", SERVO_MAX_PULSE_US), 200, 2500));
+    if (max_pulse_us_ <= min_pulse_us_) {
+        min_pulse_us_ = SERVO_MIN_PULSE_US;
+        max_pulse_us_ = SERVO_MAX_PULSE_US;
+    }
     for (int i = 0; i < SERVO_COUNT; i++) {
         char key[12];
         snprintf(key, sizeof(key), "trim%d", i);
         trim_deg_[i] = static_cast<float>(settings.GetInt(key, 0));
         snprintf(key, sizeof(key), "inv%d", i);
-        inverted_[i] = settings.GetBool(key, false);
+        // NVS holds the per-unit calibration; the config mask is a mount-level correction, so the
+        // two are combined with XOR (mask 0x44 = the mirrored right-hand hips, see config.h).
+        const bool nvs_inverted = settings.GetBool(key, false);
+        const bool mount_inverted = ((SERVO_INVERT_DEFAULT_MASK >> i) & 0x01) != 0;
+        inverted_[i] = nvs_inverted != mount_inverted;
     }
-    ESP_LOGI(TAG, "loaded trims from NVS namespace %s", kNvsNamespace);
+    ESP_LOGI(TAG, "loaded trims from NVS namespace %s (pulse band %u..%u us)",
+             kNvsNamespace, static_cast<unsigned>(min_pulse_us_),
+             static_cast<unsigned>(max_pulse_us_));
 }
 
 bool ServoController::PersistTrims() {
@@ -117,22 +137,112 @@ uint16_t ServoController::AngleToPulseUs(uint8_t joint, float angle_deg) const {
     if (joint < SERVO_COUNT && inverted_[joint]) {
         angle = span - angle;
     }
-    const float pulse =
-        SERVO_MIN_PULSE_US +
-        (angle / span) * static_cast<float>(SERVO_MAX_PULSE_US - SERVO_MIN_PULSE_US);
+    const uint16_t lo = std::min(min_pulse_us_, max_pulse_us_);
+    const uint16_t hi = std::max(min_pulse_us_, max_pulse_us_);
+    const float pulse = static_cast<float>(lo) + (angle / span) * static_cast<float>(hi - lo);
     return static_cast<uint16_t>(lroundf(pulse));
 }
 
-bool ServoController::Enqueue(CmdType type, uint8_t joint, int32_t value) {
+bool ServoController::Enqueue(CmdType type, uint8_t joint, int32_t value, int32_t value2,
+                              int32_t value3) {
     if (cmd_queue_ == nullptr) {
         return false;
     }
-    const Cmd cmd = {type, joint, value};
+    const Cmd cmd = {type, joint, value, value2, value3};
     return xQueueSend(cmd_queue_, &cmd, 0) == pdTRUE;
+}
+
+bool ServoController::SweepJoint(uint8_t joint, float to_deg, uint32_t duration_ms) {
+    if (joint >= SERVO_COUNT) {
+        return false;
+    }
+    return Enqueue(CmdType::kSweep, joint, static_cast<int32_t>(lroundf(to_deg * 10.0f)), 0,
+                   static_cast<int32_t>(duration_ms));
+}
+
+bool ServoController::RawChannel(uint8_t channel, uint16_t pulse_us) {
+    if (!hardware_ || channel > 15) {
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        boot_neutral_at_ms_ = 0;
+        boot_release_at_ms_ = 0;
+        hold_ = true;
+        relaxed_ = false;
+    }
+    pca_.SetOutputsEnabled(true);
+    const uint16_t pulse = static_cast<uint16_t>(std::clamp<int32_t>(pulse_us, 200, 2500));
+    const bool ok = pca_.SetChannelPulseUs(channel, pulse);
+    ESP_LOGI(TAG, "raw channel %u = %u us (%s)", channel, pulse, ok ? "ok" : "failed");
+    return ok;
+}
+
+void ServoController::SetPulseRange(uint16_t min_us, uint16_t max_us) {
+    const uint16_t lo = std::clamp<uint16_t>(min_us, 200, 2500);
+    const uint16_t hi = std::clamp<uint16_t>(max_us, 200, 2500);
+    if (hi <= lo) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        min_pulse_us_ = lo;
+        max_pulse_us_ = hi;
+        for (int i = 0; i < SERVO_COUNT; i++) {
+            last_ticks_[i] = 0xFFFF;  // force a rewrite with the new mapping
+        }
+    }
+    Settings settings(kNvsNamespace, true);
+    settings.SetInt("pmin", lo);
+    settings.SetInt("pmax", hi);
+    ESP_LOGI(TAG, "pulse range = %u..%u us (saved)", lo, hi);
+}
+
+void ServoController::GetPulseRange(uint16_t* min_us, uint16_t* max_us) const {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    if (min_us != nullptr) {
+        *min_us = min_pulse_us_;
+    }
+    if (max_us != nullptr) {
+        *max_us = max_pulse_us_;
+    }
+}
+
+bool ServoController::RawPulse(uint8_t joint, uint16_t pulse_us) {
+    if (joint >= SERVO_COUNT) {
+        return false;
+    }
+    const float span = 180.0f;
+    const float lo = static_cast<float>(std::min(min_pulse_us_, max_pulse_us_));
+    const float hi = static_cast<float>(std::max(min_pulse_us_, max_pulse_us_));
+    const float p = std::clamp(static_cast<float>(pulse_us), lo, hi);
+    float angle = (p - lo) * span / (hi - lo);
+    if (inverted_[joint]) {
+        angle = span - angle;
+    }
+    angle -= trim_deg_[joint];  // ClampAngle() adds the trim back
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        boot_neutral_at_ms_ = 0;
+        boot_release_at_ms_ = 0;
+        sweep_end_ms_ = 0;
+        slew_deg_per_sec_ = 400.0f;
+        accel_deg_per_sec2_ = 2000.0f;
+        hold_ = true;
+        relaxed_ = false;
+    }
+    if (hardware_) {
+        pca_.SetOutputsEnabled(true);
+    }
+    SetTarget(joint, angle);
+    ESP_LOGI(TAG, "raw pulse: joint %d = %u us (%.1f deg)", joint, pulse_us,
+             static_cast<double>(angle));
+    return true;
 }
 
 void ServoController::SetTargets(const float angles_deg[SERVO_COUNT]) {
     std::lock_guard<std::mutex> lock(state_mutex_);
+    boot_neutral_at_ms_ = 0;  // an explicit pose wins over the boot pose
     for (int i = 0; i < SERVO_COUNT; i++) {
         target_deg_[i] = ClampAngle(static_cast<uint8_t>(i), angles_deg[i]);
     }
@@ -144,8 +254,14 @@ void ServoController::SetTarget(uint8_t joint, float angle_deg) {
         return;
     }
     std::lock_guard<std::mutex> lock(state_mutex_);
+    boot_neutral_at_ms_ = 0;  // an explicit target wins over the boot pose
     target_deg_[joint] = ClampAngle(joint, angle_deg);
     last_target_ms_ = esp_timer_get_time() / 1000;
+}
+
+void ServoController::StartBootNeutral(uint32_t delay_ms) {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    boot_neutral_at_ms_ = esp_timer_get_time() / 1000 + static_cast<int64_t>(delay_ms);
 }
 
 void ServoController::SetSlewDegPerSec(float deg_per_sec) {
@@ -324,6 +440,7 @@ void ServoController::RunCommand(const Cmd& cmd) {
             PersistTrims();
             break;
         case CmdType::kSetInverted:
+            PersistTrims();
             break;
         case CmdType::kStop:
             if (hardware_) {
@@ -334,11 +451,89 @@ void ServoController::RunCommand(const Cmd& cmd) {
             hold_ = false;
             ESP_LOGI(TAG, "stopped (relaxed)");
             break;
+        case CmdType::kSweep: {
+            if (cmd.joint >= SERVO_COUNT) {
+                break;
+            }
+            if (hardware_) {
+                pca_.SetOutputsEnabled(true);
+            }
+            ApplyEnabledLocked();
+            hold_ = true;
+            boot_release_at_ms_ = 0;
+            boot_neutral_at_ms_ = 0;
+            sweep_joint_ = cmd.joint;
+            sweep_from_deg_ = current_deg_[cmd.joint];
+            sweep_to_deg_ = static_cast<float>(cmd.value) * 0.1f;
+            sweep_start_ms_ = esp_timer_get_time() / 1000;
+            const int64_t duration = std::max<int64_t>(cmd.value3, 200);
+            sweep_end_ms_ = sweep_start_ms_ + duration;
+            slew_deg_per_sec_ = std::max(30.0f, fabsf(sweep_to_deg_ - sweep_from_deg_) * 2000.0f /
+                                                    static_cast<float>(duration));
+            accel_deg_per_sec2_ = std::max(400.0f, slew_deg_per_sec_ * 4.0f);
+            ESP_LOGI(TAG, "sweep joint %d: %.1f -> %.1f deg over %lld ms", cmd.joint,
+                     static_cast<double>(sweep_from_deg_), static_cast<double>(sweep_to_deg_),
+                     duration);
+            break;
+        }
     }
 }
 
 void ServoController::Tick(float dt_s) {
     const int64_t now_ms = esp_timer_get_time() / 1000;
+
+    if (boot_release_at_ms_ != 0 && now_ms >= boot_release_at_ms_) {
+        // The boot pose has been held long enough: drop the hold so the idle timeout can relax the
+        // servos (stalled servos draw a lot of current).
+        boot_release_at_ms_ = 0;
+        hold_ = false;
+        last_target_ms_ = now_ms;
+        ESP_LOGI(TAG, "boot pose released — idle relax may now switch the PWM off");
+    }
+
+    if (sweep_end_ms_ != 0) {
+        const float span = static_cast<float>(sweep_end_ms_ - sweep_start_ms_);
+        float progress = span > 1.0f ? static_cast<float>(now_ms - sweep_start_ms_) / span : 1.0f;
+        progress = std::clamp(progress, 0.0f, 1.0f);
+        const float k = progress * progress * (3.0f - 2.0f * progress);
+        target_deg_[sweep_joint_] =
+            ClampAngle(sweep_joint_, sweep_from_deg_ + (sweep_to_deg_ - sweep_from_deg_) * k);
+        if (progress >= 1.0f) {
+            target_deg_[sweep_joint_] = ClampAngle(sweep_joint_, sweep_to_deg_);
+            sweep_end_ms_ = 0;
+            ESP_LOGI(TAG, "sweep done: joint %d at %.1f deg", sweep_joint_,
+                     static_cast<double>(current_deg_[sweep_joint_]));
+        }
+    }
+
+    if (boot_neutral_at_ms_ != 0 && now_ms >= boot_neutral_at_ms_) {
+        // Boot pose: nothing was published yet, so energise the joints at the neutral point
+        // and hold them there. The pulse is written once; the servos then travel to neutral
+        // at their own speed (MG90S has no position feedback).
+        boot_neutral_at_ms_ = 0;
+        for (int i = 0; i < SERVO_COUNT; i++) {
+            target_deg_[i] = ClampAngle(static_cast<uint8_t>(i), SERVO_DEFAULT_NEUTRAL_DEG);
+            current_deg_[i] = target_deg_[i];
+            vel_deg_s_[i] = 0.0f;
+            last_ticks_[i] = 0xFFFF;
+        }
+        if (hardware_) {
+            pca_.SetOutputsEnabled(true);
+            for (int i = 0; i < SERVO_COUNT; i++) {
+                const uint16_t pulse = AngleToPulseUs(static_cast<uint8_t>(i), current_deg_[i]);
+                if (pca_.SetChannelPulseUs(kJointChannel[i], pulse)) {
+                    last_ticks_[i] = pca_.PulseUsToTicks(pulse);
+                }
+            }
+        }
+        relaxed_ = false;
+        hold_ = true;
+        slew_deg_per_sec_ = SERVO_BOOT_NEUTRAL_SLEW_DEG_PER_SEC;
+        last_target_ms_ = now_ms;
+        boot_release_at_ms_ = now_ms + SERVO_BOOT_NEUTRAL_HOLD_MS;
+        ESP_LOGI(TAG, "boot pose: %d joints held at neutral %.0f deg", SERVO_COUNT,
+                 static_cast<double>(SERVO_DEFAULT_NEUTRAL_DEG));
+    }
 
     bool any_write = false;
     bool moved = false;
@@ -384,9 +579,12 @@ void ServoController::Tick(float dt_s) {
         const int diff =
             last_ticks_[i] == 0xFFFF ? 1000 : abs(static_cast<int>(ticks) - last_ticks_[i]);
         if (hardware_ && diff >= kMinTickDeltaToWrite) {
-            if (pca_.SetChannelPulseUs(static_cast<uint8_t>(i), pulse)) {
+            if (pca_.SetChannelPulseUs(kJointChannel[i], pulse)) {
                 last_ticks_[i] = ticks;
                 any_write = true;
+                tick_writes_++;
+            } else {
+                tick_write_fails_++;
             }
         }
     }
@@ -406,8 +604,13 @@ void ServoController::TaskEntry(void* arg) { static_cast<ServoController*>(arg)-
 
 void ServoController::TaskLoop() {
     const TickType_t period = pdMS_TO_TICKS(SERVO_UPDATE_PERIOD_MS);
-    const float dt_s = static_cast<float>(SERVO_UPDATE_PERIOD_MS) / 1000.0f;
     TickType_t last_wake = xTaskGetTickCount();
+    int64_t last_us = esp_timer_get_time();
+    int64_t log_us = last_us;
+    uint32_t loop_count = 0;
+    uint32_t writes = 0;
+    uint32_t fails = 0;
+    float last_dt_ms = 0.0f;
 
     while (true) {
         Cmd cmd;
@@ -419,10 +622,77 @@ void ServoController::TaskLoop() {
             }
         }
 
+        // Interpolate with the REAL elapsed time, not the nominal period: if a blocking I2C
+        // write or a busy bus slows this task down, the profile must still advance at the
+        // configured deg/s instead of crawling (each loop only moves vel * dt).
+        const int64_t now_us = esp_timer_get_time();
+        float dt = static_cast<float>(now_us - last_us) / 1000000.0f;
+        last_us = now_us;
+        if (dt < 0.005f) {
+            dt = 0.005f;
+        } else if (dt > 0.25f) {
+            dt = 0.25f;  // cap catch-up so a long stall cannot cause a violent jump
+        }
+
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
-            Tick(dt_s);
+            Tick(dt);
+            writes += tick_writes_;
+            fails += tick_write_fails_;
+            tick_writes_ = 0;
+            tick_write_fails_ = 0;
         }
+        last_dt_ms = dt * 1000.0f;
+        loop_count++;
+
+#if SERVO_TICK_DEBUG_LOG
+        if (now_us - log_us >= 1000000) {
+            const float span_ms = static_cast<float>(now_us - log_us) / 1000.0f;
+            float cur[2];
+            float tgt[2];
+            bool moving = false;
+            bool hold = false;
+            bool relaxed = true;
+            float slew = 0.0f;
+            float accel = 0.0f;
+            float vel0 = 0.0f;
+            uint16_t pulse0 = 0;
+            {
+                std::lock_guard<std::mutex> lock(state_mutex_);
+                for (int i = 0; i < 2; i++) {
+                    cur[i] = current_deg_[i];
+                    tgt[i] = target_deg_[i];
+                }
+                moving = false;
+                for (int i = 0; i < SERVO_COUNT; i++) {
+                    if (fabsf(target_deg_[i] - current_deg_[i]) > 0.75f) {
+                        moving = true;
+                        break;
+                    }
+                }
+                hold = hold_;
+                relaxed = relaxed_;
+                slew = slew_deg_per_sec_;
+                accel = accel_deg_per_sec2_;
+                vel0 = vel_deg_s_[0];
+                pulse0 = AngleToPulseUs(0, current_deg_[0]);
+            }
+            ESP_LOGI(TAG,
+                     "tick %.0f Hz (%.1f ms) writes %u fails %u hw %d hd %d rlx %d mv %d | "
+                     "sl %.0f ac %.0f v0 %.1f dt %.1f | j0 %.1f->%.1f (%u us) j1 %.1f->%.1f",
+                     static_cast<double>(static_cast<float>(loop_count) * 1000.0f / span_ms),
+                     static_cast<double>(span_ms / static_cast<float>(loop_count)), writes, fails,
+                     hardware_ ? 1 : 0, hold ? 1 : 0, relaxed ? 1 : 0, moving ? 1 : 0,
+                     static_cast<double>(slew), static_cast<double>(accel),
+                     static_cast<double>(vel0), static_cast<double>(last_dt_ms),
+                     static_cast<double>(cur[0]), static_cast<double>(tgt[0]), pulse0,
+                     static_cast<double>(cur[1]), static_cast<double>(tgt[1]));
+            loop_count = 0;
+            writes = 0;
+            fails = 0;
+            log_us = now_us;
+        }
+#endif
 
         vTaskDelayUntil(&last_wake, period);
     }
@@ -451,6 +721,102 @@ void ServoController::RegisterMcpTools() {
                     return std::string("joint " + std::to_string(joint) + " -> " +
                                        std::to_string(angle) + " deg");
                 });
+
+    mcp.AddTool("self.servo.sweep",
+                "Bring-up test: sweep ONE joint from its current angle to to_deg over duration_ms "
+                "using a timed smoothstep curve (no gait engine involved). Use it to prove the "
+                "PWM/servo path works, e.g. joint=0 to_deg=120 duration_ms=3000 then "
+                "to_deg=60 duration_ms=3000. Joints 0..7 = FL hip/knee, FR hip/knee, RL hip/knee, "
+                "RR hip/knee.",
+                PropertyList({Property("joint", kPropertyTypeInteger, 0, 0, SERVO_COUNT - 1),
+                              Property("to_deg", kPropertyTypeInteger, 120, 0, 180),
+                              Property("duration_ms", kPropertyTypeInteger, 3000, 200, 15000)}),
+                [this](const PropertyList& properties) -> ReturnValue {
+                    const int joint = properties["joint"].value<int>();
+                    const int to_deg = properties["to_deg"].value<int>();
+                    const int duration_ms = properties["duration_ms"].value<int>();
+                    if (!hardware_) {
+                        return std::string("error: PCA9685 not detected");
+                    }
+                    if (!SweepJoint(static_cast<uint8_t>(joint), static_cast<float>(to_deg),
+                                    static_cast<uint32_t>(duration_ms))) {
+                        return std::string("error: queue full");
+                    }
+                    char buf[128];
+                    snprintf(buf, sizeof(buf), "{\"ok\":true,\"joint\":%d,\"to_deg\":%d,\"ms\":%d}",
+                             joint, to_deg, duration_ms);
+                    return std::string(buf);
+                });
+
+    mcp.AddTool(
+        "self.servo.pulse_range",
+        "Get/set the raw pulse band (microseconds) that maps onto 0..180 deg, persisted in "
+        "NVS. Most MG90S-style servos accept about 1000..2000 us; the firmware default is "
+        "500..2500 us, which can push a servo past its mechanical stop (the servo then just "
+        "ticks and does not turn). Pass min_us and max_us to change it; pass 0/0 to just "
+        "read the current values.",
+        PropertyList({Property("min_us", kPropertyTypeInteger, 0, 0, 2500),
+                      Property("max_us", kPropertyTypeInteger, 0, 0, 2500)}),
+        [this](const PropertyList& properties) -> ReturnValue {
+            const int min_us = properties["min_us"].value<int>();
+            const int max_us = properties["max_us"].value<int>();
+            if (min_us > 0 && max_us > min_us) {
+                SetPulseRange(static_cast<uint16_t>(min_us), static_cast<uint16_t>(max_us));
+            }
+            uint16_t lo = 0;
+            uint16_t hi = 0;
+            GetPulseRange(&lo, &hi);
+            char buf[128];
+            snprintf(buf, sizeof(buf),
+                     "{\"ok\":true,\"min_us\":%u,\"max_us\":%u,\"joint0_deg\":%.1f}", lo, hi,
+                     static_cast<double>(current_deg_[0]));
+            return std::string(buf);
+        });
+
+    mcp.AddTool(
+        "self.servo.raw_pulse",
+        "Hardware test: drive ONE joint with an exact pulse width in microseconds, bypassing "
+        "the angle mapping. Use 1500 us (centre), 1200 us and 1800 us to check the servo "
+        "actually turns; e.g. raw_pulse joint=0 pulse_us=1200 then 1800.",
+        PropertyList({Property("joint", kPropertyTypeInteger, 0, 0, SERVO_COUNT - 1),
+                      Property("pulse_us", kPropertyTypeInteger, 1500, 200, 2500)}),
+        [this](const PropertyList& properties) -> ReturnValue {
+            const int joint = properties["joint"].value<int>();
+            const int pulse_us = properties["pulse_us"].value<int>();
+            if (!hardware_) {
+                return std::string("error: PCA9685 not detected");
+            }
+            if (!RawPulse(static_cast<uint8_t>(joint), static_cast<uint16_t>(pulse_us))) {
+                return std::string("error: bad joint");
+            }
+            char buf[128];
+            snprintf(buf, sizeof(buf), "{\"ok\":true,\"joint\":%d,\"pulse_us\":%d}", joint,
+                     pulse_us);
+            return std::string(buf);
+        });
+
+    mcp.AddTool(
+        "self.servo.raw_channel",
+        "Hardware test: drive ANY PCA9685 channel 0..15 with an exact pulse width, ignoring the "
+        "joint map. Use it to test a spare channel (8..15) with a known-good servo: if the servo "
+        "runs on channel 8 but not on its own channel, that driver channel is damaged — re-plug "
+        "the servo into the spare channel and update SERVO_CHANNEL_MAP in config.h.",
+        PropertyList({Property("channel", kPropertyTypeInteger, 0, 0, 15),
+                      Property("pulse_us", kPropertyTypeInteger, 1500, 200, 2500)}),
+        [this](const PropertyList& properties) -> ReturnValue {
+            const int channel = properties["channel"].value<int>();
+            const int pulse_us = properties["pulse_us"].value<int>();
+            if (!hardware_) {
+                return std::string("error: PCA9685 not detected");
+            }
+            if (!RawChannel(static_cast<uint8_t>(channel), static_cast<uint16_t>(pulse_us))) {
+                return std::string("error: channel write failed");
+            }
+            char buf[128];
+            snprintf(buf, sizeof(buf), "{\"ok\":true,\"channel\":%d,\"pulse_us\":%d}", channel,
+                     pulse_us);
+            return std::string(buf);
+        });
 
     mcp.AddTool("self.servo.set_all",
                 "Set all 8 joint angles at once. Pass a comma-separated list of 8 values in "

@@ -82,12 +82,32 @@
 // limp through any reset/brownout and only energise after a clean init.
 #define PCA9685_OE_GPIO GPIO_NUM_1
 
+// Logical joint -> PCA9685 channel. Joint order: 0/1 = leg 1 FL hip/knee, 2/3 = leg 2 FR,
+// 4/5 = leg 3 RL, 6/7 = leg 4 RR. Only change an entry when a driver channel is damaged:
+// re-plug that servo into a free channel (8..15) and point the joint there.
+#define SERVO_CHANNEL_MAP {0, 1, 2, 3, 4, 5, 6, 7}
+
+// Default direction inversion per joint (bit i = joint i): a "mount" correction applied ON TOP
+// of the NVS calibration (effective = NVS value XOR mask bit). Robot geometry: hip = VERTICAL
+// yaw axis (shaft down), 4 legs at the 4 corners of the square body, tibia on the body diagonal
+// at neutral. Both sides are mirror images, so the right-hand hips (joint 2 = FR, 6 = RR) must be
+// inverted; add bits 3 and 7 (0xCC) if the right-hand knees fold down instead of up.
+#define SERVO_INVERT_DEFAULT_MASK 0x44
+
 #define SERVO_COUNT 8
 #define SERVO_PWM_FREQ_HZ 50
 #define SERVO_PWM_RESOLUTION 4096
-#define SERVO_MIN_PULSE_US 500
-#define SERVO_MAX_PULSE_US 2500
-#define SERVO_UPDATE_PERIOD_MS 20  // 50 Hz interpolation tick
+// MG90S (and SG90-class) servos take ~1000..2000 us for 0..180 deg. The mapping in
+// ServoController is pulse = min + (angle/180) * (max - min), so a wider default (500..2500)
+// stretches every commanded angle 2x in the physical world AND drives the ends past the servo's
+// mechanical stops (the servo then just ticks/buzzes, stalls and sags the 5 V rail).
+// Keep these at the servo's real band; per-robot differences are handled by trim/invert
+// (persisted in NVS) instead. Overridable at runtime with self.servo.pulse_range.
+#define SERVO_MIN_PULSE_US 1000
+#define SERVO_MAX_PULSE_US 2000
+#define SERVO_UPDATE_PERIOD_MS 10  // 100 Hz interpolation tick (dày hơn = đường đi mượt hơn)
+// 1 = log the servo task rate/state once per second (bring-up diagnostics).
+#define SERVO_TICK_DEBUG_LOG 1
 #define SERVO_CMD_QUEUE_DEPTH 8
 
 // Servo calibration / motion defaults (per-servo trim lives in NVS, see servo_controller).
@@ -99,6 +119,16 @@
 #define SERVO_SLEW_DEG_PER_SEC 90.0f
 #define SERVO_ACCEL_DEG_PER_SEC2 240.0f
 #define SERVO_STOW_SLEW_DEG_PER_SEC 90.0f
+
+// Boot pose: the joints stay limp after power-up, then (after the delay) every joint travels
+// to the neutral point and holds there, so the legs settle instead of snapping at reset.
+// Any pose published before the deadline cancels this.
+#define SERVO_BOOT_NEUTRAL_ENABLE 1
+#define SERVO_BOOT_NEUTRAL_DELAY_MS 1500
+#define SERVO_BOOT_NEUTRAL_SLEW_DEG_PER_SEC 45.0f
+// Keep torque only this long after the boot pose, then let the idle timeout release the servos
+// (8 stalled joints draw a lot of current and can sag the servo rail).
+#define SERVO_BOOT_NEUTRAL_HOLD_MS 3000
 
 // Relax (PWM off) after this long with no new target WHILE NOT HOLDING A POSE.
 // Holding a stand pose keeps torque; only idle/relaxed states time out.
@@ -189,10 +219,39 @@
 // 0 = use the inverse-kinematics crawl instead.
 // ---------------------------------------------------------------------------
 #define BLUE_V4_JOINT_SPACE_GAIT 1
-#define GAIT_JOINT_HIP_NEUTRAL_DEG 60.0f  // gait neutral (the MOUNT neutral is still 90)
-#define GAIT_JOINT_HIP_TRAVEL_DEG 120.0f  // hip travel per step (forward sweep)
-#define GAIT_JOINT_KNEE_TRAVEL_DEG 60.0f  // knee fold while the leg swings
-#define GAIT_JOINT_STEP_MS 1200           // default ms per leg cycle (slow)
+#define GAIT_JOINT_HIP_NEUTRAL_DEG 90.0f  // centre of the hip sweep (mount neutral)
+// Hip servo = VERTICAL yaw axis (shaft pointing down, arm pointing to the body centre, leg
+// pointing outward on the body diagonal): the hip swings the foot sideways/fore-aft, so the
+// FORWARD travel per step is sqrt(2) * R * sin(travel/2). With R = 70 mm: 40 deg = ~34 mm,
+// 70 deg = ~57 mm, 90 deg = ~70 mm per step (90 deg = 45..135 deg on the servo, still inside
+// the 1000..2000 us band), 120 deg = ~86 mm (bench only).
+#define GAIT_JOINT_HIP_TRAVEL_DEG 90.0f   // walking default (override per call with hip_deg=)
+#define GAIT_JOINT_KNEE_TRAVEL_DEG 60.0f  // knee fold, lifts the foot (override with knee_deg=)
+#define GAIT_JOINT_STEP_MS 1400           // nominal ms per leg cycle (slow)
+
+// Chiều đi tới: +1 = hip quét theo chiều servo tăng, -1 = đảo lại. Đổi dấu ở đây nếu robot
+// đi lùi khi được lệnh đi tới (1 bước vẫn là 4 chân/8 servo, chỉ đảo chiều quét hip).
+#define GAIT_JOINT_FORWARD_SIGN (-1.0f)
+
+// --- Phase timing (per leg, in the crawl order) ---
+// The commanded ramp ends on schedule but a loaded servo lands later, so every phase gets a
+// short dwell before the next joint moves. Without the plant dwell the hips start rotating back
+// while the foot is still in the air: the leg drags instead of pushing the body.
+#define GAIT_JOINT_LIFT_DWELL_MS 40       // hold after the knee lifts, before the hip sweeps
+#define GAIT_JOINT_PLANT_DWELL_MS 120     // hold after the knee lowers — the foot must be ON the floor
+#define GAIT_JOINT_SETTLE_TIMEOUT_MS 700  // hard cap on a settle wait (safety)
+#define GAIT_JOINT_PLANT_SLOWDOWN 1.25f   // the knee descends this much slower than it lifts
+// Knee fold -> foot lift: the tibia (knee axis -> foot tip) is 60 mm, so a fold of delta raises
+// the foot by about 60 * (sin(alpha + delta) - sin(alpha)) with alpha ~ the tibia angle below
+// horizontal at neutral: 20 deg ~ 7 mm, 30 deg ~ 15 mm, 40 deg ~ 17 mm.
+#define LEG_TIBIA_LEN_MM 60.0f
+// Joint-space posture (spider geometry): extra knee fold per mm of body-height reduction.
+// Approximation for the 60 mm tibia at ~45 deg: about 1.3 deg of fold per mm.
+#define GAIT_JOINT_CROUCH_DEG_PER_MM 1.30f
+// Knee-fold bias per degree of body pitch (positive = nose down) / roll (positive = left down).
+#define GAIT_JOINT_TILT_DEG_PER_DEG 0.6f
+// Distance from the hip yaw axis to the foot tip at neutral, in mm (documentation / travel maths).
+#define LEG_FOOT_RADIUS_MM 70.0f
 
 // ---------------------------------------------------------------------------
 // Board behaviour

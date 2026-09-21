@@ -13,8 +13,10 @@ namespace {
 // Matches blue-v2's defaults so the server-side mv:* mapping is untouched.
 constexpr int kDefaultDurationMs = 5000;
 constexpr int kDefaultStrideMm = 40;
-// Crawl step time from wheel-speed magnitude: 100% -> 500 ms, 30% -> 1270 ms.
-constexpr int kStepMsAtFullSpeed = 1600;
+// Crawl step time from wheel-speed magnitude: 100% -> 350 ms, 30% -> 1120 ms.
+// Faster phases look smoother: an analogue MG90S has a ~1 deg deadband, so a slow sweep
+// moves in visible "notches", while a fast one keeps the servo continuously in motion.
+constexpr int kStepMsAtFullSpeed = 1450;
 constexpr int kStepMsPerPercent = 11;
 
 // Default gesture timelines when the server sends none (per dance track).
@@ -25,8 +27,12 @@ int StepMsForSpeed(int magnitude) {
 }
 
 int StepsForDuration(int duration_ms, int step_ms) {
-    const int cycle_ms = std::max(step_ms * 4, 400);  // one crawl step = 4 legs
-    return std::clamp(duration_ms / cycle_ms, 1, 12);
+    // One crawl step = four legs, and every leg runs its phases sequentially (see
+    // GaitEngine::JointCrawlCycleMs). Using `step_ms * 4` underestimated the real time by ~4x, so
+    // a "5 s" move actually walked for ~12 s and the requested duration was never honoured.
+    const int cycle_ms = std::max(GaitEngine::JointCrawlCycleMs(step_ms), 400);
+    const int steps = (duration_ms + cycle_ms / 2) / cycle_ms;  // round to the nearest step
+    return std::clamp(steps, 1, 12);
 }
 }  // namespace
 

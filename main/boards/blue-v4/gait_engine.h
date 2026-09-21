@@ -45,7 +45,8 @@ public:
     bool EnqueueSit();
     bool EnqueueRelax();
     bool EnqueueStop();
-    bool EnqueueWalk(const std::string& direction, int steps, int stride_mm, int step_ms);
+    bool EnqueueWalk(const std::string& direction, int steps, int stride_mm, int step_ms,
+                     int hip_deg = 0, int knee_deg = 0);
     bool EnqueueTurn(const std::string& direction, int steps, int step_ms);
     bool EnqueueBody(int height_mm, int pitch_deg, int roll_deg);
     // Servo dance driven by a timeline of gesture letters (D/g/v/c), one per segment.
@@ -55,6 +56,11 @@ public:
     // Bring-up: slowly sweep ONE leg's hip/knee in joint space (no IK), the others hold.
     // hip_deg = total hip travel (e.g. 120), knee_deg = knee fold (e.g. 60).
     bool EnqueueLegSweep(int leg, int hip_deg, int knee_deg, int duration_ms);
+
+    // Real wall-clock time (ms) of ONE crawl step = all four legs, every phase plus the settle
+    // dwells. The phases run SEQUENTIALLY, so this is ~4x the sum of a leg's phases — never
+    // step_ms * 4. Callers converting a requested duration into a step count must use this.
+    static int JointCrawlCycleMs(int step_ms);
 
     // Registers self.gait.* MCP tools.
     void RegisterMcpTools();
@@ -79,6 +85,8 @@ private:
         int32_t b = 0;    // stride_mm / step_ms
         int32_t c = 0;    // step_ms / pitch
         int32_t d = 0;    // roll
+        int32_t e = 0;    // walk: hip travel (deg), 0 = GAIT_JOINT_HIP_TRAVEL_DEG
+        int32_t f = 0;    // walk: knee travel (deg), 0 = GAIT_JOINT_KNEE_TRAVEL_DEG
         int8_t sign = 1;  // walk/turn direction (+1 = forward / left)
         bool is_turn = false;
         char timeline[65] = {};  // dance gesture letters (fixed size: queue stays POD)
@@ -110,9 +118,30 @@ private:
 
     void PublishLegs(const LegState legs[4], float body_height_mm, float pitch_deg, float roll_deg);
 
+    // Joint-space posture for the spider geometry (vertical hip yaw): the hips stay on the body
+    // diagonal and the KNEE fold sets the body height (more fold = lower body). Used by stand,
+    // sit and body; the IK path (ApplyPose/PublishLegs) does not apply to this geometry.
+    std::string ApplyJointPosture(int height_mm, int pitch_deg, int roll_deg);
+
+    // Blocks until every joint reached its target (or timeout_ms elapsed). Walking phases use
+    // this instead of fixed delays, so a move is never cut short before the travel is covered.
+    void WaitForSettle(int timeout_ms);
+
+    // Drives the joints from `from` to `to` over duration_ms along a smoothstep curve: the gait
+    // owns the timing/travel, so a move always covers exactly (to - from) and always finishes on
+    // time. The servo limiter is set with headroom so it tracks the curve instead of lagging.
+    // Returns false if the move was cancelled.
+    bool RampJoints(const float from[SERVO_COUNT], const float to[SERVO_COUNT], int duration_ms);
+
+    // Wait until the servos have physically settled: at least min_ms of dwell AND the limiter
+    // has caught up with the target (timeout_ms caps the wait). RampJoints finishes on time, but
+    // a loaded servo lands later — the hip must not rotate back before the foot is on the ground.
+    bool WaitForJointsSettled(int min_ms, int timeout_ms);
+
     std::string RunWalk(int steps, int stride_mm, int step_ms, int8_t sign);
-    // Joint-space crawl: hip 0..GAIT_JOINT_HIP_TRAVEL_DEG, knee 0..GAIT_JOINT_KNEE_TRAVEL_DEG.
-    std::string RunWalkJoint(int steps, int step_ms, int8_t sign);
+    // Joint-space crawl: hip yaw travel and knee fold, both in degrees (0 = config default).
+    std::string RunWalkJoint(int steps, int step_ms, int8_t sign, float hip_travel_deg,
+                             float knee_travel_deg);
     std::string RunLegSweep(int leg, int hip_deg, int knee_deg, int duration_ms);
     std::string RunTurn(int steps, int step_ms, int8_t sign);
     std::string RunDance(int segment_ms, const char* timeline);

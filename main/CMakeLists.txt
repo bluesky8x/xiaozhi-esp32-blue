@@ -104,6 +104,11 @@ elseif(CONFIG_BOARD_TYPE_BLUE_V3)
     set(BUILTIN_TEXT_FONT font_noto_sans_basic_16_4)
     set(BUILTIN_ICON_FONT font_material_symbols_16_4)
     set(DEFAULT_EMOJI_COLLECTION otto-gif)
+elseif(CONFIG_BOARD_TYPE_BLUE_V4)
+    set(BOARD_DIR "blue-v4")
+    set(BUILTIN_TEXT_FONT font_noto_sans_basic_16_4)
+    set(BUILTIN_ICON_FONT font_material_symbols_16_4)
+    set(DEFAULT_EMOJI_COLLECTION otto-gif)
 elseif(CONFIG_BOARD_TYPE_BREAD_COMPACT_ML307)
     set(BOARD_DIR "bread-compact-ml307")
     set(BUILTIN_TEXT_FONT font_noto_sans_basic_14_1)
@@ -895,6 +900,14 @@ if(CONFIG_BOARD_TYPE_BLUE_V3)
         ${CMAKE_CURRENT_SOURCE_DIR}/boards/blue-v2
         ${CMAKE_CURRENT_SOURCE_DIR}/boards/blue-v3)
 endif()
+if(CONFIG_BOARD_TYPE_BLUE_V4)
+    # Self-contained board: only the shared otto icon font/emoji assets come from
+    # outside boards/blue-v4 (Glob already picks up boards/blue-v4/*.cc).
+    list(APPEND BOARD_SOURCES
+        ${CMAKE_CURRENT_SOURCE_DIR}/boards/otto-robot/otto_emoji_display.cc
+        ${CMAKE_CURRENT_SOURCE_DIR}/boards/otto-robot/otto_icon_font.c)
+    list(APPEND INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/boards/blue-v4)
+endif()
 list(APPEND SOURCES ${BOARD_SOURCES})
 
 # Select one audio engine for each chip family
@@ -1079,6 +1092,12 @@ if(CONFIG_BOARD_TYPE_BLUE_V2)
         pkolt__vl53l0x
     )
 endif()
+if(CONFIG_BOARD_TYPE_BLUE_V4)
+    # VL53L0X front range sensor (shares the board-owned I2C bus with the PCA9685).
+    list(APPEND MAIN_PRIV_REQUIRES_EXTRA
+        pkolt__vl53l0x
+    )
+endif()
 idf_component_register(SRCS ${SOURCES}
                     EMBED_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS}
                     INCLUDE_DIRS ${INCLUDE_DIRS}
@@ -1143,6 +1162,16 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
         target_compile_definitions(${COMPONENT_LIB} PRIVATE DISPLAY_LVGL_BUFFER_LINES=80)
     endif()
     if(CONFIG_BOARD_TYPE_BLUE_V3)
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE AUDIO_MIC_DEBUG_LOG=1)
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE AUDIO_MIC_SHIFT_BITS=12)
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE AUDIO_MIC_SOFT_LIMIT=24000)
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE AUDIO_MIC_AGC_ENABLE=1)
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE AUDIO_MIC_AGC_TARGET_PEAK=4500)
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE AUDIO_MIC_AGC_MAX_GAIN=5.0f)
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE AUDIO_MIC_AGC_MIN_PRE=300)
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE DISPLAY_LVGL_BUFFER_LINES=80)
+    endif()
+    if(CONFIG_BOARD_TYPE_BLUE_V4)
         target_compile_definitions(${COMPONENT_LIB} PRIVATE AUDIO_MIC_DEBUG_LOG=1)
         target_compile_definitions(${COMPONENT_LIB} PRIVATE AUDIO_MIC_SHIFT_BITS=12)
         target_compile_definitions(${COMPONENT_LIB} PRIVATE AUDIO_MIC_SOFT_LIMIT=24000)

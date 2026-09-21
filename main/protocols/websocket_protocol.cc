@@ -15,9 +15,13 @@
 #include "boards/blue-v2/config.h"
 #elif CONFIG_BOARD_TYPE_BLUE_V3
 #include "boards/blue-v3/config.h"
+#elif CONFIG_BOARD_TYPE_BLUE_V4
+#include "boards/blue-v4/config.h"
 #endif
 #if CONFIG_BOARD_TYPE_BLUE_V2 || CONFIG_BOARD_TYPE_BLUE_V3
 #include "boards/blue-v2/blue_cloud_guard.h"
+#elif CONFIG_BOARD_TYPE_BLUE_V4
+#include "boards/blue-v4/blue_v4_cloud_guard.h"
 #endif
 
 #define TAG "WS"
@@ -89,7 +93,7 @@ void WebsocketProtocol::CloseAudioChannel(bool send_goodbye) {
 bool WebsocketProtocol::OpenAudioChannel() {
     Settings settings("websocket", false);
     std::string url = settings.GetString("url");
-#if (CONFIG_BOARD_TYPE_BLUE_V2 || CONFIG_BOARD_TYPE_BLUE_V3) && BLUE_BLOCK_CLOUD_SERVERS
+#if (CONFIG_BOARD_TYPE_BLUE_V2 || CONFIG_BOARD_TYPE_BLUE_V3 || CONFIG_BOARD_TYPE_BLUE_V4) && BLUE_BLOCK_CLOUD_SERVERS
     if (url.empty() || BlueIsCloudServerUrl(url.c_str())) {
         ESP_LOGE(TAG, "Blocked websocket connect — cloud or missing URL (use WiFi portal OTA)");
         SetError(Lang::Strings::SERVER_NOT_FOUND);
