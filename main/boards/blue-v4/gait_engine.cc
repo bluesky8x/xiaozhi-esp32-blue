@@ -33,22 +33,39 @@ constexpr BlueV4Leg kCrawlOrder[4] = {BlueV4Leg::kFrontRight, BlueV4Leg::kRearLe
 
 // Phase times of ONE leg inside a crawl step, in milliseconds. The phases run one after the
 // other, so the real crawl-step time is the sum below x 4 legs.
+//   swing  = one mixed arc (hip sweep + knee lift envelope, ONE ramp)
+//   settle = wait until the foot is really on the floor (loaded servo lags the command)
+//   push   = all four hips rotate back together while every foot is planted
 struct JointPhaseMs {
-    int lift;
     int swing;
-    int plant;
+    int settle;
     int push;
 };
 
-JointPhaseMs JointPhases(int step_ms) {
+// How long the foot needs to really be on the floor after the arc ends: knee_fold degrees at
+// roughly GAIT_JOINT_SETTLE_DEG_PER_SEC (loaded servo), never below the minimum dwell.
+int PlantSettleMs(float knee_fold_deg) {
+    const int need = static_cast<int>(knee_fold_deg * 1000.0f / GAIT_JOINT_SETTLE_DEG_PER_SEC);
+    return std::clamp(need, GAIT_JOINT_PLANT_DWELL_MS, 700);
+}
+
+// Cho limiter đủ slew VÀ đủ accel để BÁM đường cong thay vì bò theo sau nó. Accel được chọn sao
+// cho sai số bám ở trạng thái ổn định ≈ GAIT_JOINT_TRACK_LAG_DEG (lag = rate² / 2a); accel chỉ
+// ảnh hưởng tới độ bám, hình dạng chuyển động vẫn do đường cong quyết định.
+static void SetTrackingProfile(ServoController* servos, float peak_rate_deg_per_sec) {
+    const float slew = std::clamp(peak_rate_deg_per_sec * 1.3f, 40.0f, 600.0f);
+    const float accel = std::max(
+        400.0f, peak_rate_deg_per_sec * peak_rate_deg_per_sec / (2.0f * GAIT_JOINT_TRACK_LAG_DEG));
+    servos->SetSlewDegPerSec(slew);
+    servos->SetAccelDegPerSec2(accel);
+}
+
+JointPhaseMs JointPhases(int step_ms, float knee_fold_deg) {
     const int ms = std::clamp(step_ms, 200, 6000);
     JointPhaseMs p;
     p.swing = std::max(ms, 300);
     p.push = p.swing;
-    p.lift = std::max(ms / 2, 200);
-    // The knee descends slower than it lifts: dropping it fast made the loaded servo lag, so the
-    // hip push started while the foot was still in the air.
-    p.plant = std::max(static_cast<int>(p.lift * GAIT_JOINT_PLANT_SLOWDOWN), 300);
+    p.settle = PlantSettleMs(knee_fold_deg);
     return p;
 }
 
@@ -305,12 +322,10 @@ bool GaitEngine::RampJoints(const float from[SERVO_COUNT], const float to[SERVO_
         return !cancel_.load();
     }
 
-    // Smoothstep peaks at 1.5x the average rate; give the servo limiter ~2x plus a fast ramp so it
-    // can follow the curve instead of lagging behind it (a lag would shorten the real travel).
-    const float avg_rate = max_travel * 1000.0f / static_cast<float>(duration_ms);
-    const float slew = std::clamp(avg_rate * 2.0f, 40.0f, 400.0f);
-    servos_->SetSlewDegPerSec(slew);
-    servos_->SetAccelDegPerSec2(std::max(400.0f, slew * 5.0f));
+    // Smoothstep peaks at 1.5x the average rate: give the limiter enough headroom (and enough
+    // acceleration) to follow the curve instead of lagging behind it — a lag would shorten the
+    // real travel and keep IsMoving() true, so every settle wait would burn its whole timeout.
+    SetTrackingProfile(servos_, max_travel * 1500.0f / static_cast<float>(duration_ms));
 
     const int ticks = std::max(duration_ms / SERVO_UPDATE_PERIOD_MS, 2);
     for (int t = 1; t <= ticks; t++) {
@@ -331,10 +346,88 @@ bool GaitEngine::RampJoints(const float from[SERVO_COUNT], const float to[SERVO_
 }
 
 int GaitEngine::JointCrawlCycleMs(int step_ms) {
-    const JointPhaseMs p = JointPhases(step_ms);
-    const int per_leg = p.lift + GAIT_JOINT_LIFT_DWELL_MS + p.swing + p.plant +
-                        GAIT_JOINT_PLANT_DWELL_MS + p.push;
+    const JointPhaseMs p = JointPhases(step_ms, GAIT_JOINT_KNEE_TRAVEL_DEG);
+    const int per_leg = p.swing + p.settle + p.push;
     return per_leg * 4;
+}
+
+// Đường bao nhấc chân của knee trong một cú vung (lên → giữ → xuống) theo tham số x (0..1).
+// 0 = chân chạm nền, 1 = nhấc cao nhất. Tam giác thuần (hold = 0) cho tốc độ knee thấp nhất nên
+// servo bám được; tăng hold thì chân ở trên cao lâu hơn nhưng knee phải đi nhanh hơn.
+static float LiftEnvelope(float x) {
+    const float hold = std::clamp(GAIT_JOINT_LIFT_HOLD_FRAC, 0.0f, 0.6f);
+    const float rise = (1.0f - hold) * 0.5f;
+    if (x <= rise) {
+        return x / rise;
+    }
+    if (x >= 1.0f - rise) {
+        return (1.0f - x) / rise;
+    }
+    return 1.0f;
+}
+
+bool GaitEngine::RampJointsArc(const float from[SERVO_COUNT], float next[SERVO_COUNT],
+                               int hip_joint, int knee_joint, float hip_to, float knee_fold_deg,
+                               int duration_ms) {
+    // RC-style "mix": MỘT ramp, MỘT tham số tiến trình điều khiển cả hai kênh
+    //   hip  = smoothstep(x)  → quét tới, khởi hành và dừng đều mượt
+    //   knee = LiftEnvelope(x) → nhấc lên rồi hạ xuống, bàn chân rời và chạm nền
+    // Toàn bộ tính từ mô hình ĐÃ RA LỆNH của phía gọi (from[]) — KHÔNG bao giờ đọc vị trí thật
+    // của servo: limiter luôn trễ một chút, nếu lấy giá trị trễ làm điểm xuất phát thì mỗi bước
+    // knee "đáp" cao hơn một ít cho tới khi bàn chân không bao giờ chạm nền nữa (robot đứng yên).
+    duration_ms = std::clamp(duration_ms, 80, 8000);
+    const float duration_s = static_cast<float>(duration_ms) / 1000.0f;
+    const float hip_from = from[hip_joint];
+    const float knee_down = SERVO_DEFAULT_NEUTRAL_DEG;  // chân chạm nền
+    const float knee_up = knee_down + std::clamp(knee_fold_deg, 0.0f, 90.0f);
+
+    // Tốc độ đỉnh: smoothstep đạt 1.5× tốc độ trung bình, đường bao nhấc đạt 1/(2*rise).
+    const float hold = std::clamp(GAIT_JOINT_LIFT_HOLD_FRAC, 0.0f, 0.6f);
+    const float rise = (1.0f - hold) * 0.5f;
+    const float hip_rate = fabsf(hip_to - hip_from) * 1.5f / duration_s;
+    const float knee_rate = (knee_up - knee_down) / (rise * duration_s);
+    const float need = std::max(hip_rate, knee_rate);
+
+    for (int i = 0; i < SERVO_COUNT; i++) {
+        next[i] = from[i];
+    }
+    next[hip_joint] = hip_to;
+    next[knee_joint] = knee_down;
+    if (need < 0.5f) {  // không di chuyển đủ để đáng ramp
+        servos_->SetTargets(next);
+        return !cancel_.load();
+    }
+
+    // Cấp đủ slew và đủ accel để limiter bám đường cong (xem SetTrackingProfile).
+    SetTrackingProfile(servos_, need);
+
+    servos_->EnableOutputs();
+    servos_->SetHold(true);
+
+    const int ticks = std::max(duration_ms / SERVO_UPDATE_PERIOD_MS, 4);
+    for (int t = 1; t <= ticks; t++) {
+        if (cancel_.load()) {
+            return false;
+        }
+        const float x = static_cast<float>(t) / static_cast<float>(ticks);
+        const float sweep = x * x * (3.0f - 2.0f * x);  // smooth start/stop, no overshoot
+        for (int i = 0; i < SERVO_COUNT; i++) {
+            next[i] = from[i];
+        }
+        next[hip_joint] = hip_from + (hip_to - hip_from) * sweep;
+        next[knee_joint] = knee_down + (knee_up - knee_down) * LiftEnvelope(x);
+        servos_->SetTargets(next);
+        vTaskDelay(pdMS_TO_TICKS(SERVO_UPDATE_PERIOD_MS));
+    }
+
+    // Đáp đúng điểm cuối của đường cong: hip tới đích, knee về đúng neutral (bàn chân trên nền).
+    for (int i = 0; i < SERVO_COUNT; i++) {
+        next[i] = from[i];
+    }
+    next[hip_joint] = hip_to;
+    next[knee_joint] = knee_down;
+    servos_->SetTargets(next);
+    return !cancel_.load();
 }
 
 bool GaitEngine::WaitForJointsSettled(int min_ms, int timeout_ms) {
@@ -348,6 +441,10 @@ bool GaitEngine::WaitForJointsSettled(int min_ms, int timeout_ms) {
             return true;
         }
         if (elapsed_ms >= timeout_ms) {
+            if (servos_->IsMoving()) {
+                ESP_LOGW(TAG, "settle timeout %d ms — servo van chua toi dich (qua tai/nen ha toc)",
+                         timeout_ms);
+            }
             return true;  // safety: never block the gait forever
         }
         vTaskDelay(pdMS_TO_TICKS(SERVO_UPDATE_PERIOD_MS));
@@ -422,14 +519,13 @@ std::string GaitEngine::RunWalkJoint(int steps, int step_ms, int8_t sign, float 
     //
     // Phase order per leg (exactly as specified by the user):
     //   0. start from the neutral point (all joints at SERVO_DEFAULT_NEUTRAL_DEG)
-    //   1. KNEE lifts — the foot leaves the floor
-    //   2. HIP sweeps forward (yaw, counter-clockwise seen from above)
-    //   3. KNEE lowers back to the floor and the foot is planted
-    //   4. only THEN do all four hips rotate back together (the planted feet push the body)
-    // Every phase is a timed smoothstep ramp followed by a settle dwell, so the yaw never returns
-    // while the foot is still in the air. Foot travel per step is about 2 * R * sin(hip_travel/2)
-    // (R = 70 mm on this build), so keep the hip travel small (30-45 deg) on the floor and use
-    // bigger values only on the bench.
+    //   1. ONE mixed swing (RC-style): the hip sweeps forward while the knee lifts and lands the
+    //      foot — a SINGLE ramp with a SINGLE progress parameter, so there is no stop in the
+    //      middle of the swing. The knee always lands exactly on neutral, so the foot is down.
+    //   2. wait until the foot is REALLY on the floor (the loaded servo lands late)
+    //   3. only THEN do all four hips rotate back together (the planted feet push the body)
+    // Foot travel per step is about 2 * R * sin(hip_travel/2) (R = 70 mm on this build), so keep
+    // the hip travel small (30-45 deg) on the floor and use bigger values only on the bench.
     steps = std::clamp(steps, 1, 12);
     step_ms = std::clamp(step_ms, 200, 6000);
 
@@ -442,12 +538,16 @@ std::string GaitEngine::RunWalkJoint(int steps, int step_ms, int8_t sign, float 
     const float hip_back = center - half * sense;
     const float knee_fold = std::clamp(knee_travel_deg, 0.0f, 90.0f);
 
-    // step_ms is the time of the biggest move (the full hip sweep); the knee phases take half.
-    const JointPhaseMs phase = JointPhases(step_ms);
+    // step_ms is the time of one mixed swing arc; the push uses the same time.
+    const JointPhaseMs phase = JointPhases(step_ms, knee_fold);
     const int swing_ms = phase.swing;
     const int push_ms = phase.push;
-    const int lift_ms = phase.lift;
-    const int plant_ms = phase.plant;
+    const int plant_settle_ms = phase.settle;
+    ESP_LOGI(TAG,
+             "joint walk: %d steps, swing arc %d ms, plant settle %d ms, push %d ms, "
+             "hip travel %.0f deg, knee fold %.0f deg",
+             steps, swing_ms, plant_settle_ms, push_ms, static_cast<double>(hip_travel_deg),
+             static_cast<double>(knee_fold));
 
     servos_->EnableOutputs();
     servos_->SetHold(true);
@@ -487,31 +587,18 @@ std::string GaitEngine::RunWalkJoint(int steps, int step_ms, int8_t sign, float 
             const int hip = leg * 2;
             const int knee = hip + 1;
 
-            // 1) Fold the knee so the foot clears the ground.
-            next[knee] = SERVO_DEFAULT_NEUTRAL_DEG + knee_fold;
-            if (!RampJoints(from, next, lift_ms)) {
-                return "cancelled";
-            }
-            commit();
-            // Let the foot really leave the ground before the hip sweeps it forward.
-            if (!WaitForJointsSettled(GAIT_JOINT_LIFT_DWELL_MS, GAIT_JOINT_SETTLE_TIMEOUT_MS)) {
-                return "cancelled";
-            }
-
-            // 2) Sweep the hip across the whole travel.
-            next[hip] = hip_forward;
-            if (!RampJoints(from, next, swing_ms)) {
+            // 1) MỘT cú vung: hip quét ra trước + knee nhấc/hạ theo cùng một tham số (kiểu mix
+            //    trong RC) ⇒ không có điểm dừng giữa chân. Cú vung tính từ mô hình đã ra lệnh
+            //    (`from`), và luôn đáp knee về đúng neutral ⇒ bàn chân chắc chắn hạ xuống nền.
+            if (!RampJointsArc(from, next, hip, knee, hip_forward, knee_fold, swing_ms)) {
                 return "cancelled";
             }
             commit();
 
-            // 3) Plant the foot again — and do NOT let any hip move until it is really down.
-            next[knee] = SERVO_DEFAULT_NEUTRAL_DEG;
-            if (!RampJoints(from, next, plant_ms)) {
-                return "cancelled";
-            }
-            commit();
-            if (!WaitForJointsSettled(GAIT_JOINT_PLANT_DWELL_MS, GAIT_JOINT_SETTLE_TIMEOUT_MS)) {
+            // 2) Chờ chân THẬT SỰ chạm nền rồi mới cho hip quay về. Target đã đứng yên nên
+            //    IsMoving() lúc này phản ánh đúng trạng thái thật của servo.
+            if (!WaitForJointsSettled(plant_settle_ms,
+                                      plant_settle_ms + GAIT_JOINT_SETTLE_TIMEOUT_MS)) {
                 return "cancelled";
             }
 
@@ -526,11 +613,14 @@ std::string GaitEngine::RunWalkJoint(int steps, int step_ms, int8_t sign, float 
         }
     }
 
-    // Finish standing with every joint back at the mount neutral.
+    // Finish standing with every joint back at the mount neutral, then put the motion profile
+    // back to the conservative default (the arc raised slew/accel to follow its curve).
     for (int i = 0; i < SERVO_COUNT; i++) {
         next[i] = SERVO_DEFAULT_NEUTRAL_DEG;
     }
     RampJoints(from, next, swing_ms);
+    servos_->SetSlewDegPerSec(SERVO_SLEW_DEG_PER_SEC);
+    servos_->SetAccelDegPerSec2(SERVO_ACCEL_DEG_PER_SEC2);
     return cancel_.load() ? "cancelled" : "walk complete";
 }
 

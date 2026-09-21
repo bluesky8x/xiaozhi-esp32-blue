@@ -234,13 +234,24 @@
 #define GAIT_JOINT_FORWARD_SIGN (-1.0f)
 
 // --- Phase timing (per leg, in the crawl order) ---
-// The commanded ramp ends on schedule but a loaded servo lands later, so every phase gets a
-// short dwell before the next joint moves. Without the plant dwell the hips start rotating back
-// while the foot is still in the air: the leg drags instead of pushing the body.
-#define GAIT_JOINT_LIFT_DWELL_MS 40       // hold after the knee lifts, before the hip sweeps
-#define GAIT_JOINT_PLANT_DWELL_MS 120     // hold after the knee lowers — the foot must be ON the floor
+// One cú vung chân = MỘT đường cong duy nhất (kiểu "mix" trong RC): cùng một tham số chạy
+// 0→1, kênh hip quét đơn điệu (smoothstep) còn kênh knee nhấc rồi hạ chân theo đường bao
+// tam giác. Hai servo dùng chung một tham số nên không có điểm dừng giữa chân — đây là lý do
+// RC mượt. Bàn giao xong, phải chờ chân THẬT SỰ chạm nền rồi mới cho hip quay về (plant settle).
+//   0.0 = tam giác thuần (knee đi chậm nhất → servo bám được)
+//   0.2 = giữ chân ở đỉnh 20% hành trình (chân cao lâu hơn, nhưng knee phải đi nhanh hơn ~25%)
+#define GAIT_JOINT_LIFT_HOLD_FRAC 0.0f
+// Cho phép servo bám đường cong trễ hơn bao nhiêu độ. Slew/accel của limiter được đặt thành
+// 1.3x tốc độ đỉnh và rate^2/(2*lag) để sai số bám không vượt giá trị này — nhờ vậy chân không
+// "trễ dần" qua từng bước (trước đây knee đọng lại giữa đường nhấc rồi mỗi bước cao thêm một
+// ít cho tới khi bàn chân không bao giờ chạm nền nữa).
+#define GAIT_JOINT_TRACK_LAG_DEG 4.0f
+#define GAIT_JOINT_PLANT_DWELL_MS 150  // sàn tối thiểu của thời gian chờ chạm nền
+// The limiter reports "arrived" when the COMMAND reaches the target, but a loaded servo (it is
+// lifting the whole body here) lands later. Wait for the real travel at this rate before letting
+// any hip rotate back — otherwise the yaw returns while the foot is still in the air.
+#define GAIT_JOINT_SETTLE_DEG_PER_SEC 250.0f
 #define GAIT_JOINT_SETTLE_TIMEOUT_MS 700  // hard cap on a settle wait (safety)
-#define GAIT_JOINT_PLANT_SLOWDOWN 1.25f   // the knee descends this much slower than it lifts
 // Knee fold -> foot lift: the tibia (knee axis -> foot tip) is 60 mm, so a fold of delta raises
 // the foot by about 60 * (sin(alpha + delta) - sin(alpha)) with alpha ~ the tibia angle below
 // horizontal at neutral: 20 deg ~ 7 mm, 30 deg ~ 15 mm, 40 deg ~ 17 mm.

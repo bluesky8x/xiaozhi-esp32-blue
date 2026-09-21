@@ -133,6 +133,17 @@ private:
     // Returns false if the move was cancelled.
     bool RampJoints(const float from[SERVO_COUNT], const float to[SERVO_COUNT], int duration_ms);
 
+    // One RC-style "mix" arc for a swinging leg: over ONE ramp the hip channel sweeps
+    // monotonically to `hip_to` while the knee channel follows a lift envelope (0 -> fold -> 0).
+    // Because both servos share the same progress parameter the foot flies a smooth arc with no
+    // stop in the middle (that is what makes an RC-controlled servo look smooth).
+    //
+    // It works on the CALLER'S commanded model (from[] -> next[]) and never reads the servo's
+    // reported position: the limiter always lags a little, and planning on that lagging value
+    // made the knee land higher on every leg until the foot never reached the floor again.
+    bool RampJointsArc(const float from[SERVO_COUNT], float next[SERVO_COUNT], int hip_joint,
+                       int knee_joint, float hip_to, float knee_fold_deg, int duration_ms);
+
     // Wait until the servos have physically settled: at least min_ms of dwell AND the limiter
     // has caught up with the target (timeout_ms caps the wait). RampJoints finishes on time, but
     // a loaded servo lands later — the hip must not rotate back before the foot is on the ground.
