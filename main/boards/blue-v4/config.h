@@ -225,8 +225,11 @@
 // FORWARD travel per step is sqrt(2) * R * sin(travel/2). With R = 70 mm: 40 deg = ~34 mm,
 // 70 deg = ~57 mm, 90 deg = ~70 mm per step (90 deg = 45..135 deg on the servo, still inside
 // the 1000..2000 us band), 120 deg = ~86 mm (bench only).
-#define GAIT_JOINT_HIP_TRAVEL_DEG 90.0f   // walking default (override per call with hip_deg=)
-#define GAIT_JOINT_KNEE_TRAVEL_DEG 60.0f  // knee fold, lifts the foot (override with knee_deg=)
+#define GAIT_JOINT_HIP_TRAVEL_DEG 90.0f  // walking default (override per call with hip_deg=)
+// Biên độ nhấc của knee. +20% so với bản 60 deg (chân nhấc cao hơn ~20%):
+//   knee đi từ 90 deg (chân chạm nền) lên 162 deg (1900 us — vẫn trong dải 1000..2000).
+// Muốn quay lại bản cũ: đổi 72.0f -> 60.0f.
+#define GAIT_JOINT_KNEE_TRAVEL_DEG 72.0f  // knee fold, lifts the foot (override with knee_deg=)
 #define GAIT_JOINT_STEP_MS 1400           // nominal ms per leg cycle (slow)
 
 // Chiều đi tới: +1 = hip quét theo chiều servo tăng, -1 = đảo lại. Đổi dấu ở đây nếu robot
