@@ -637,8 +637,7 @@ std::string GaitEngine::RunWalkJoint(int steps, int step_ms, int8_t sign, float 
         }
     };
 
-    // Stand up straight first, then park every hip at the rear extreme so even the first swing is
-    // a full travel.
+    // Stand up straight first: every joint at the mount neutral.
     for (int i = 0; i < SERVO_COUNT; i++) {
         next[i] = SERVO_DEFAULT_NEUTRAL_DEG;
     }
@@ -646,6 +645,13 @@ std::string GaitEngine::RunWalkJoint(int steps, int step_ms, int8_t sign, float 
         return "cancelled";
     }
     commit();
+#if GAIT_JOINT_STEP_FROM_NEUTRAL
+    // Bước ĐẦU TIÊN vung thẳng về phía trước từ tư thế đứng (hip đi từ neutral ra hip_forward).
+    // Trước đây phải "park" cả 4 hip về hip_back rồi mới vung ⇒ robot trông như LÙI LẠI một đoạn
+    // trước khi đi tới. Đổi lại: bước đầu chỉ được nửa hành trình, và pha push của nó đưa cả 4
+    // hip về hip_back; từ bước 2 trở đi là hành trình đầy như cũ.
+#else
+    // Park every hip at the rear extreme so even the first swing is a full travel.
     for (int leg = 0; leg < 4; leg++) {
         next[leg * 2] = hip_back;
     }
@@ -653,6 +659,7 @@ std::string GaitEngine::RunWalkJoint(int steps, int step_ms, int8_t sign, float 
         return "cancelled";
     }
     commit();
+#endif
 
     for (int step = 0; step < steps; step++) {
         for (int index = 0; index < 4; index++) {
@@ -669,9 +676,19 @@ std::string GaitEngine::RunWalkJoint(int steps, int step_ms, int8_t sign, float 
             }
             commit();
 
-            // 4) Body advance: all four hips rotate back together (the feet stay planted).
-            for (int l = 0; l < 4; l++) {
-                next[l * 2] = hip_back;
+            // 3) Body advance (push): the planted feet rotate back together, which moves the body
+            //    forward. In steady state the three support legs are ALREADY at hip_back, so only
+            //    the leg that just landed actually moves.
+            //    Pass ĐẦU thì 3 chân kia vẫn ở tư thế đứng (neutral) — kéo chúng về hip_back ở
+            //    đây là "lôi" 3 bàn chân đang đặt trên nền về sau ⇒ robot trông như bị lùi ngay
+            //    sau bước đầu (đúng cái cảm giác cần bỏ). Vì vậy ở pass đầu chỉ đưa CHÂN VỪA VUNG
+            //    về hip_back; 3 chân kia để nguyên, chúng tự về hip_back ở lượt vung của mình.
+            if (step == 0 && GAIT_JOINT_STEP_FROM_NEUTRAL) {
+                next[hip] = hip_back;
+            } else {
+                for (int l = 0; l < 4; l++) {
+                    next[l * 2] = hip_back;
+                }
             }
             if (!RampJoints(from, next, push_ms)) {
                 return "cancelled";

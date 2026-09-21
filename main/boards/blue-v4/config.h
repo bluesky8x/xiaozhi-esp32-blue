@@ -264,6 +264,13 @@
 // Đổi được lúc chạy bằng tool self.gait.swing hoặc tag srv:swing=arc|direct, không cần nạp lại.
 #define GAIT_JOINT_SWING_DIRECT 0
 
+// Bước đầu tiên khi bắt đầu đi:
+//   1 = vung chân THẲNG về phía trước từ tư thế đứng (neutral) — tự nhiên, robot không lùi lại
+//       trước khi đi tới. Đổi lại bước đầu chỉ được nửa hành trình (hip: neutral → hip_forward).
+//   0 = "park" cả 4 hip về hip_back trước rồi mới vung — bước đầu đủ hành trình nhưng robot
+//       trông như lùi lại một đoạn trước khi đi tới.
+#define GAIT_JOINT_STEP_FROM_NEUTRAL 1
+
 #define GAIT_JOINT_LIFT_HOLD_FRAC 0.0f
 // Cho phép servo bám đường cong trễ hơn bao nhiêu độ. Slew/accel của limiter được đặt thành
 // 1.3x tốc độ đỉnh và rate^2/(2*lag) để sai số bám không vượt giá trị này — nhờ vậy chân không
