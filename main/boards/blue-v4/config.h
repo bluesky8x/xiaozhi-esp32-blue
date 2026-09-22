@@ -87,12 +87,20 @@
 // re-plug that servo into a free channel (8..15) and point the joint there.
 #define SERVO_CHANNEL_MAP {0, 1, 2, 3, 4, 5, 6, 7}
 
-// Default direction inversion per joint (bit i = joint i): a "mount" correction applied ON TOP
-// of the NVS calibration (effective = NVS value XOR mask bit). Robot geometry: hip = VERTICAL
-// yaw axis (shaft down), 4 legs at the 4 corners of the square body, tibia on the body diagonal
-// at neutral. Both sides are mirror images, so the right-hand hips (joint 2 = FR, 6 = RR) must be
-// inverted; add bits 3 and 7 (0xCC) if the right-hand knees fold down instead of up.
-#define SERVO_INVERT_DEFAULT_MASK 0x44
+// Default direction inversion per joint (bit i = joint i): the FACTORY DEFAULT only — an
+// explicit value in NVS (servo.invert / tag `srv:invert=J:0|1`) overrides it absolutely.
+//
+// QUY LUẬT LẮP RÁP (xác nhận trên bàn 22-09-2026): 4 cặp servo được lắp NGƯỢC nhau —
+//   (j0, j2) hip trước · (j1, j3) knee trước · (j4, j6) hip sau · (j5, j7) knee sau.
+// Vì 2 con trong mỗi cặp lắp ngược chiều, firmware phải ĐẢO ĐÚNG MỘT CON trong mỗi cặp thì
+// cả 2 chân mới quay cùng chiều trong hệ thân. Mask dưới đây đảo: j2, j1, j6, j7 ✓ (4/4 cặp).
+//
+// Chọn con nào trong cặp để đảo là tuỳ hướng lắp thực tế — sai 1 con ⇒ chân đó chạy ngược:
+//   • ngồi xuống: 2 chân gập đúng, 2 chân kia co/duỗi NGƯỢC lại
+//   • đi: robot bị kéo lệch/vặn thay vì đi thẳng
+// Cách sửa nhanh, KHÔNG cần nạp lại: `srv:leg=N` (test riêng từng chân) rồi
+// `srv:invert=N:0|1` (NVS thắng tuyệt đối), sau đó bake lại mask ở đây.
+#define SERVO_INVERT_DEFAULT_MASK 0xC6
 
 #define SERVO_COUNT 8
 #define SERVO_PWM_FREQ_HZ 50
@@ -117,7 +125,7 @@
 // Dòng nội suy của gait (delta nhỏ, 100 Hz) KHÔNG bị giãn — nó không phải bước nhảy.
 #define SERVO_STAGGER_START_ENABLE 1
 #define SERVO_STAGGER_MIN_STEP_DEG 12.0f  // >= mức này mới coi là "bước nhảy"
-#define SERVO_STAGGER_MS 20               // khoảng cách giữa 2 servo liên tiếp (Sesame: 20 ms)
+#define SERVO_STAGGER_MS 40               // khoảng cách giữa 2 servo liên tiếp (Sesame: 20 ms)
 // Trần số kênh ghi PWM trong MỘT tick, xoay vòng điểm bắt đầu ⇒ 8 kênh không dồn vào cùng
 // một thời điểm (vừa đủ cho gait: 1 cú vung = 2 kênh, pha push = 4 hip).
 #define SERVO_PWM_MAX_WRITES_PER_TICK 4
@@ -213,17 +221,19 @@
 
 // ---------------------------------------------------------------------------
 // Leg geometry (mm) — used by the gait engine inverse kinematics.
-// Defaults suit a typical 3D-printed micro quadruped with MG90S joints.
-// Tune with the real frame; these are compile-time constants, not hardcoded poses.
-// ---------------------------------------------------------------------------
-#define LEG_FEMUR_MM 60.0f          // hip axis -> knee axis
-#define LEG_TIBIA_MM 90.0f          // knee axis -> foot contact
-#define LEG_HIP_OFFSET_X_MM 45.0f   // body centre -> hip axis, fore/aft
-#define LEG_HIP_OFFSET_Y_MM 55.0f   // body centre -> hip axis, left/right
+// ĐO THẬT bằng thước kẹp 22-09-2026 (khớp cả 3 số đo độc lập — xem LEG_FOOT_RADIUS_MM):
+#define LEG_FEMUR_MM 30.0f         // trục yaw -> trục knee (khoảng ngang, "cánh tay" của hip)
+#define LEG_TIBIA_MM 55.0f         // trục knee -> mặt bàn chân (càng)
+#define LEG_HIP_OFFSET_X_MM 45.0f  // body centre -> hip axis, fore/aft
+#define LEG_HIP_OFFSET_Y_MM 55.0f  // body centre -> hip axis, left/right
+// ⚠️ Chiều cao thân Ở ĐÂY LÀ ĐƠN VỊ ẢO, không phải mm thật: nó chỉ dùng để quy đổi
+// "hạ thân X mm" -> độ gập knee trong chế độ joint-space (GAIT_JOINT_CROUCH_DEG_PER_MM).
+// Chiều cao THẬT là hơn 37.7 mm (xem LEG_TIBIA_LEN_MM) — đừng lấy 95/66/120 so với thước kẹp.
 #define BODY_STAND_HEIGHT_MM 95.0f  // default hip->foot vertical distance
 // Ngồi (pst:sit) = hạ thân xuống mức này; self.gait.body cũng hạ được tới đây.
-// 62 mm ⇒ knee gập (95-62)*1.30 ≈ 43° (bản cũ 70 mm ⇒ 32.5°) = hành trình ngồi +30%.
-#define BODY_MIN_HEIGHT_MM 62.0f
+// 66 mm ⇒ knee gập (95-66)*1.30 ≈ 38° (+16% so với bản 70 mm/32.5°).
+// ĐÃ THỬ 62 mm (42.9°): sát giới hạn cơ khí, 4 knee gập cùng lúc làm 2 servo sau stall.
+#define BODY_MIN_HEIGHT_MM 66.0f
 #define BODY_MAX_HEIGHT_MM 120.0f
 #define STRIDE_LENGTH_MM 40.0f  // default crawl stride
 
@@ -244,7 +254,22 @@
 //   knee đi từ 90 deg (chân chạm nền) lên 162 deg (1900 us — vẫn trong dải 1000..2000).
 // Muốn quay lại bản cũ: đổi 72.0f -> 60.0f.
 #define GAIT_JOINT_KNEE_TRAVEL_DEG 72.0f  // knee fold, lifts the foot (override with knee_deg=)
-#define GAIT_JOINT_STEP_MS 1400           // nominal ms per leg cycle (slow)
+#define GAIT_JOINT_STEP_MS \
+    1400  // default step_ms khi lệnh không nêu (xem GAIT_JOINT_SEQUENTIAL_CRAWL)
+
+// --- Phối hợp 4 chân ---
+// 0 = CONTINUOUS (mặc định) — duty factor 3/4: cả 4 chân chạy trên MỘT đồng hồ, lệch pha 25%.
+//     1 chân VUNG (25% chu kỳ) + 3 chân TRỤ quét liên tục (75%). Vì 3 chân trụ quét về sau cùng
+//     một tốc độ nên bàn chân của chúng đứng yên so với nền ⇒ thân dịch đều, KHÔNG trượt lết
+//     (khác bản cũ: chỉ 1 hip đẩy nên 3 chân trụ bị kéo lết). Cả 4 chân luôn chuyển động.
+//     1 bước = 1 chu kỳ = 4 x swing_ms (350 ms ⇒ 1400 ms/bước, nhanh ~2.8x bản cũ).
+// 1 = SEQUENTIAL — từng chân một (vung → chờ chân chạm nền → push), bản cũ (~3950 ms/bước).
+// Đổi được lúc chạy: tool self.gait.crawl hoặc tag srv:crawl=continuous|sequential.
+#define GAIT_JOINT_SEQUENTIAL_CRAWL 0
+// Thời gian "vào nhịp": đưa 4 chân từ tư thế đứng vào đúng pha xuất phát của gait (chân sắp
+// vung ở hip_back, 3 chân trụ trải đều trên hành trình). Các độ lệch cộng lại bằng 0 nên thân
+// KHÔNG trôi về sau — khác pha "park" cũ (kéo cả 4 hip về sau rồi mới đi).
+#define GAIT_JOINT_CRAWL_ENTRY_MS 400
 
 // Chiều đi tới: +1 = hip quét theo chiều servo tăng, -1 = đảo lại. Đổi dấu ở đây nếu robot
 // đi lùi khi được lệnh đi tới (1 bước vẫn là 4 chân/8 servo, chỉ đảo chiều quét hip).
@@ -283,23 +308,51 @@
 // any hip rotate back — otherwise the yaw returns while the foot is still in the air.
 #define GAIT_JOINT_SETTLE_DEG_PER_SEC 250.0f
 #define GAIT_JOINT_SETTLE_TIMEOUT_MS 700  // hard cap on a settle wait (safety)
-// Knee fold -> foot lift: the tibia (knee axis -> foot tip) is 60 mm, so a fold of delta raises
-// the foot by about 60 * (sin(alpha + delta) - sin(alpha)) with alpha ~ the tibia angle below
-// horizontal at neutral: 20 deg ~ 7 mm, 30 deg ~ 15 mm, 40 deg ~ 17 mm.
-#define LEG_TIBIA_LEN_MM 60.0f
+// Gập knee -> hạ thân / nhấc chân. Càng (knee -> bàn chân) = 55 mm và ở tư thế đứng nó nghiêng
+// alpha = 43.3° so với mặt nền (suy ra từ R = 70 mm: cos(alpha) = (70-30)/55), nên:
+//   hạ thân = 55 * (sin(alpha + delta) - sin(alpha)); chân nhấc lên cũng đúng công thức này.
+//   gập 10° -> 6.4 mm · 19° (nghiêng mặc định) -> 11.0 mm · 38° (ngồi) -> 16.6 mm
+//   CỰC ĐẠI ở gập 47° (càng thẳng đứng) -> 17.3 mm ⇒ gập thêm nữa KHÔNG hạ thêm được.
+#define LEG_TIBIA_LEN_MM 55.0f
 // Joint-space posture (spider geometry): extra knee fold per mm of body-height reduction.
-// Approximation for the 60 mm tibia at ~45 deg: about 1.3 deg of fold per mm.
+// Từ hình học thật: ở tư thế đứng 1 mm = 1/(55*cos43.3°*pi/180) ≈ 1.43° gập, nhưng độ hạ giảm
+// dần khi càng tiến về thẳng đứng nên lấy trung bình 1.30°/mm cho cả dải dùng được.
 #define GAIT_JOINT_CROUCH_DEG_PER_MM 1.30f
 // --- Tốc độ đổi tư thế (ngồi / đứng / nghiêng) ---
-// Thời gian = hành trình lớn nhất / rate, kẹp trong [min, max]. Trước đây cố định 900 ms cho
-// MỌI tư thế nên ngồi/đứng rất chậm (43° trong 0.9 s ≈ 48 deg/s).
-//  140 deg/s ⇒ ngồi/đứng (43°) ≈ 310 ms; nghiêng nhỏ bị kẹp ở 300 ms.
+// Thời gian một LƯỢT = hành trình / tốc độ, kẹp trong [min, max]. Tốc độ là tốc độ GÓC của
+// servo (deg/s) và KHÔNG chia theo số servo cùng chạy ⇒ mọi tư thế có cùng "cảm giác nhanh
+// chậm": hành trình dài đi lâu hơn, hành trình ngắn xong sớm hơn.
 #define POSTURE_RATE_DEG_PER_SEC 140.0f
-#define POSTURE_MIN_MS 300
+// SÀN thời gian một LƯỢT — đây chính là chỗ trước đây làm nghiêng bị "nhích từng tí một":
+// sàn 300 ms ⇒ nghiêng 12° (19° knee) chỉ còn 64°/s, bản cũ 0.6°/độ (7° knee) còn 24°/s,
+// trong khi ngồi 38°/0.27 s = 140°/s ⇒ nhìn nhanh gấp 2-6 lần. Hạ xuống 150 ms để hành
+// trình ngắn cũng đạt ~130°/s, tức nghiêng nhanh/mượt như ngồi.
+#define POSTURE_MIN_MS 150
 #define POSTURE_MAX_MS 900
-// Knee-fold bias per degree of body pitch (positive = nose down) / roll (positive = left down).
-#define GAIT_JOINT_TILT_DEG_PER_DEG 0.6f
-// Distance from the hip yaw axis to the foot tip at neutral, in mm (documentation / travel maths).
+// Hành trình knee ≥ mức này thì mới phải chia LƯỢT. Dưới mức này làm một lượt (dòng không đáng
+// kể) nên các điều chỉnh nhỏ vẫn xong trong đúng 300 ms.
+// Lý do phải chia: ngồi sâu = 4 knee gập cùng lúc, mỗi con chịu ~1/4 khối lượng thân ⇒ dòng đỉnh
+// lớn. Đo trên bàn: test riêng từng chân thì gập đủ 43° được, nhưng khi ngồi (4 chân cùng lúc)
+// thì 2 chân sau stall.
+#define POSTURE_SEQUENTIAL_DEG 12.0f
+// Số servo được phép chạy CÙNG LÚC trong một lượt khi đã phải chia lượt:
+//   4 knee CÙNG hướng (ngồi / đứng) ⇒ 1 — chạy từng chân một (đang rất mượt, giữ nguyên).
+//   2 knee gập + 2 knee duỗi (nghiêng / chúi) ⇒ 2 — bắt cặp, chỉ 2 lượt x ~150 ms.
+// Chia lượt chỉ để giới hạn DÒNG đỉnh, không để làm chậm: mỗi lượt vẫn chạy ở
+// POSTURE_RATE_DEG_PER_SEC. Nếu sau này gắn thân robot vào mà thấy brownout khi nghiêng thì
+// hạ số này xuống 1 (4 lượt, vẫn nhanh) hoặc hạ POSTURE_RATE_DEG_PER_SEC.
+#define POSTURE_SERVOS_PER_PHASE 2
+// Chênh lệch nhỏ hơn mức này (độ) coi như khớp đã ở đúng chỗ, khỏi đưa vào lượt.
+#define POSTURE_MOVE_EPS_DEG 0.5f
+// Độ gập thêm cho MỖI độ pitch/roll. 1.6 ⇒ `pst:lt` (mặc định 12°) = ±19° chênh giữa 2 bên:
+// bên "thấp" gập xuống như ngồi, bên kia duỗi ra đứng thẳng (bản cũ 0.6f ⇒ chỉ ±7°, quá nhỏ).
+#define GAIT_JOINT_TILT_DEG_PER_DEG 1.6f
+// Kẹp riêng 2 phía: cơ cấu gập được sâu hơn nhiều so với khi duỗi ngược ra ngoài.
+#define GAIT_JOINT_TILT_MAX_FOLD_DEG 35.0f    // trần phía gập (ngồi sâu nhất ~38°)
+#define GAIT_JOINT_TILT_MAX_EXTEND_DEG 20.0f  // trần phía duỗi (knee mở ra ngoài)
+// Khoảng cách NGANG từ trục yaw tới bàn chân ở tư thế đứng. Không phải số đo trực tiếp mà suy
+// ra từ 2 số đo kia: R = LEG_FEMUR_MM + LEG_TIBIA_MM*cos(alpha) = 30 + 55*cos(43.3°) = 69.9 mm ✓
+// (khớp với R ≈ 70 mm đo được trước đó ⇒ 3 số đo độc lập ăn khớp nhau).
 #define LEG_FOOT_RADIUS_MM 70.0f
 
 // ---------------------------------------------------------------------------

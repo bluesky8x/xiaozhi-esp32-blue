@@ -99,11 +99,11 @@ void ServoController::LoadTrims() {
         snprintf(key, sizeof(key), "trim%d", i);
         trim_deg_[i] = static_cast<float>(settings.GetInt(key, 0));
         snprintf(key, sizeof(key), "inv%d", i);
-        // NVS holds the per-unit calibration; the config mask is a mount-level correction, so the
-        // two are combined with XOR (mask 0x44 = the mirrored right-hand hips, see config.h).
-        const bool nvs_inverted = settings.GetBool(key, false);
+        // NVS là override TUYỆT ĐỐI; mask trong config.h chỉ là giá trị mặc định nhà máy.
+        // (Trước đây hai thứ XOR với nhau nên `srv:invert=J:1` là no-op im lặng với mọi joint mà
+        // bit mask đã bằng 1 — đó là cách robot này bị đảo ngược knee bên trái.)
         const bool mount_inverted = ((SERVO_INVERT_DEFAULT_MASK >> i) & 0x01) != 0;
-        inverted_[i] = nvs_inverted != mount_inverted;
+        inverted_[i] = settings.GetBool(key, mount_inverted);
     }
     ESP_LOGI(TAG, "loaded trims from NVS namespace %s (pulse band %u..%u us)", kNvsNamespace,
              static_cast<unsigned>(min_pulse_us_), static_cast<unsigned>(max_pulse_us_));

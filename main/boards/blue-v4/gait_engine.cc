@@ -346,7 +346,13 @@ bool GaitEngine::RampJoints(const float from[SERVO_COUNT], const float to[SERVO_
 }
 
 int GaitEngine::JointCrawlCycleMs(int step_ms) {
-    const JointPhaseMs p = JointPhases(step_ms, GAIT_JOINT_KNEE_TRAVEL_DEG);
+    const int ms = std::clamp(step_ms, 200, 6000);
+    GaitEngine* self = Instance();
+    if (self != nullptr && !self->SequentialCrawl()) {
+        // Crawl liên tục: 1 bước = 1 chu kỳ = 4 x thời gian vung (không còn pha push/chờ riêng).
+        return std::clamp(ms, 150, 2000) * 4;
+    }
+    const JointPhaseMs p = JointPhases(ms, GAIT_JOINT_KNEE_TRAVEL_DEG);
     const int per_leg = p.swing + p.settle + p.push;
     return per_leg * 4;
 }
@@ -364,6 +370,29 @@ static float LiftEnvelope(float x) {
         return (1.0f - x) / rise;
     }
     return 1.0f;
+}
+
+// ── Crawl LIÊN TỤC (duty factor 3/4) ────────────────────────────────────────────────────────
+// Tư thế của MỘT chân tại pha p (0..1) của chu kỳ:
+//   [0, swing_frac)  VUNG : hip hip_back → hip_forward, knee nhấc rồi hạ (mix trên cùng tham số)
+//   [swing_frac, 1)  TRỤ  : hip hip_forward → hip_back TUYẾN TÍNH, knee ở neutral
+//
+// Đường hip lúc vung là cubic Hermite h(u) = u²(10-7u)/3 → h'(0) = 0, h'(1) = -1/3. Vì thời gian
+// vung = 1/3 thời gian trụ, h'(1) = -1/3 cho hip ĐÚNG tốc độ của pha trụ ở cuối cú vung: bàn chân
+// đáp xuống với vận tốc bằng vận tốc nền ⇒ không cào/cuốc. Đỉnh tốc độ 1.59x trung bình (bản
+// smoothstep là 1.5x) nên servo vẫn bám được.
+static void LegPoseAtPhase(float p, float swing_frac, float hip_forward, float hip_back,
+                           float knee_fold, float* hip_deg, float* knee_deg) {
+    if (p < swing_frac) {
+        const float u = std::clamp(p / swing_frac, 0.0f, 1.0f);
+        const float h = u * u * (10.0f - 7.0f * u) / 3.0f;
+        *hip_deg = hip_back + (hip_forward - hip_back) * h;
+        *knee_deg = SERVO_DEFAULT_NEUTRAL_DEG + knee_fold * LiftEnvelope(u);
+    } else {
+        const float u = std::clamp((p - swing_frac) / (1.0f - swing_frac), 0.0f, 1.0f);
+        *hip_deg = hip_forward + (hip_back - hip_forward) * u;  // TUYẾN TÍNH: tốc độ không đổi
+        *knee_deg = SERVO_DEFAULT_NEUTRAL_DEG;
+    }
 }
 
 bool GaitEngine::RampJointsArc(const float from[SERVO_COUNT], float next[SERVO_COUNT],
@@ -514,6 +543,14 @@ bool GaitEngine::WaitForJointsSettled(int min_ms, int timeout_ms) {
     return false;
 }
 
+// Thời gian một LƯỢT đổi tư thế: hành trình / tốc độ, kẹp trong [min, max]. Đây là tốc độ GÓC
+// của servo nên "cảm giác nhanh chậm" giống nhau ở mọi tư thế; sàn POSTURE_MIN_MS chỉ để một
+// nhích rất nhỏ không đi quá nhanh (xem giải thích ở POSTURE_MIN_MS trong config.h).
+static int PosturePhaseMs(float travel_deg) {
+    return std::clamp(static_cast<int>(travel_deg * 1000.0f / POSTURE_RATE_DEG_PER_SEC),
+                      POSTURE_MIN_MS, POSTURE_MAX_MS);
+}
+
 std::string GaitEngine::ApplyJointPosture(int height_mm, int pitch_deg, int roll_deg) {
     // Spider geometry: every hip stays at neutral (legs on the body diagonal) and the body height
     // comes from how much the knees fold — more fold = lower body. Pitch/roll bias the fold per
@@ -536,27 +573,90 @@ std::string GaitEngine::ApplyJointPosture(int height_mm, int pitch_deg, int roll
                                leg == static_cast<int>(BlueV4Leg::kFrontRight));
         const bool is_left = (leg == static_cast<int>(BlueV4Leg::kFrontLeft) ||
                               leg == static_cast<int>(BlueV4Leg::kRearLeft));
-        const float bias = (is_front ? pitch : -pitch) + (is_left ? roll : -roll);
+        // Nghiêng/chúi = lệch gập giữa 2 bên: bên "thấp" gập xuống (như ngồi), bên kia duỗi ra.
+        // Kẹp riêng 2 phía vì cơ cấu gập sâu được còn duỗi ngược ra ngoài th× ít.
+        const float bias =
+            std::clamp((is_front ? pitch : -pitch) + (is_left ? roll : -roll),
+                       -GAIT_JOINT_TILT_MAX_EXTEND_DEG, GAIT_JOINT_TILT_MAX_FOLD_DEG);
         next[leg * 2] = SERVO_DEFAULT_NEUTRAL_DEG;
         next[leg * 2 + 1] = SERVO_DEFAULT_NEUTRAL_DEG + crouch + bias;
     }
 
-    // Đổi tư thế theo hành trình thật (xem POSTURE_* trong config.h): ngồi/đứng sâu thì đi lâu
-    // hơn một chút, nghiêng nhẹ thì nhanh — trước đây cố định 900 ms cho mọi tư thế nên ngồi
-    // xuống / đứng lên rất chậm.
-    float max_travel = 0.0f;
-    for (int i = 0; i < SERVO_COUNT; i++) {
-        max_travel = std::max(max_travel, fabsf(next[i] - from[i]));
+    // --- Chia việc thành các LƯỢT: KHÔNG bao giờ cho >2 servo kéo tải cùng lúc ---
+    // Rail servo chỉ 5 V/2 A (README) và loa đang phát TTS cùng lúc. Đo trên bàn: cho 4 knee
+    // chạy cùng lúc thì 2 con sau stall, servo bò "từng tí một" vài giây mới tới đích — người
+    // dùng thấy động tác rất chậm, dù đường cong lệnh chỉ 300 ms.
+    // Nhóm GẬP trước (hạ bên "thấp" xuống, trọng lực hỗ trợ) rồi mới tới nhóm DUỖI (nâng bên
+    // kia lên); trong mỗi nhóm giữ thứ tự kCrawlOrder.
+    int fold[4];
+    int extend[4];
+    int fold_n = 0;
+    int extend_n = 0;
+    float max_knee_travel = 0.0f;
+    for (int index = 0; index < 4; index++) {
+        const int leg = static_cast<int>(kCrawlOrder[index]);
+        const float delta = next[leg * 2 + 1] - from[leg * 2 + 1];
+        max_knee_travel = std::max(max_knee_travel, fabsf(delta));
+        if (fabsf(delta) < POSTURE_MOVE_EPS_DEG) {
+            continue;
+        }
+        if (delta > 0.0f) {
+            fold[fold_n++] = leg;
+        } else {
+            extend[extend_n++] = leg;
+        }
     }
-    const int duration_ms =
-        std::clamp(static_cast<int>(max_travel * 1000.0f / POSTURE_RATE_DEG_PER_SEC),
-                   POSTURE_MIN_MS, POSTURE_MAX_MS);
+    int work[4];
+    int work_n = 0;
+    for (int i = 0; i < fold_n; i++) {
+        work[work_n++] = fold[i];
+    }
+    for (int i = 0; i < extend_n; i++) {
+        work[work_n++] = extend[i];
+    }
+    // Nghiêng / chúi (có cả gập lẫn duỗi): bắt cặp 2 con một lượt ⇒ chỉ 2 lượt x ~150 ms.
+    // Ngồi / đứng (4 knee cùng hướng): từng chân một.
+    const bool mixed = (fold_n > 0 && extend_n > 0);
+    const int per_phase = mixed ? std::max(POSTURE_SERVOS_PER_PHASE, 1) : 1;
+    ESP_LOGI(TAG, "posture h=%d pitch=%d roll=%d: %d knee, %d servo/luot%s", height_mm, pitch_deg,
+             roll_deg, work_n, per_phase, mixed ? " (nghieng/chui)" : "");
 
     servos_->EnableOutputs();
     servos_->SetHold(true);
-    if (!RampJoints(from, next, duration_ms)) {
-        return "cancelled";
+
+    if (max_knee_travel < POSTURE_SEQUENTIAL_DEG) {
+        // Tư thế nhỏ (điều chỉnh nhẹ): một lượt cho tất cả, dòng đỉnh không đáng kể.
+        if (!RampJoints(from, next, PosturePhaseMs(max_knee_travel))) {
+            return "cancelled";
+        }
+    } else {
+        float pose[SERVO_COUNT];
+        for (int i = 0; i < SERVO_COUNT; i++) {
+            pose[i] = from[i];
+        }
+        for (int start = 0; start < work_n; start += per_phase) {
+            const int count = std::min(per_phase, work_n - start);
+            float travel = 0.0f;
+            float step_next[SERVO_COUNT];
+            for (int i = 0; i < SERVO_COUNT; i++) {
+                step_next[i] = pose[i];
+            }
+            for (int k = 0; k < count; k++) {
+                const int leg = work[start + k];
+                travel = std::max(travel, fabsf(next[leg * 2 + 1] - pose[leg * 2 + 1]));
+                step_next[leg * 2] = next[leg * 2];  // hip về neutral (thường đã ở đó sẵn)
+                step_next[leg * 2 + 1] = next[leg * 2 + 1];
+            }
+            if (!RampJoints(pose, step_next, PosturePhaseMs(travel))) {
+                return "cancelled";
+            }
+            for (int i = 0; i < SERVO_COUNT; i++) {
+                pose[i] = step_next[i];
+            }
+        }
     }
+    servos_->SetSlewDegPerSec(SERVO_SLEW_DEG_PER_SEC);
+    servos_->SetAccelDegPerSec2(SERVO_ACCEL_DEG_PER_SEC2);
     body_height_mm_ = static_cast<float>(height_mm);
     pitch_deg_ = static_cast<float>(pitch_deg);
     roll_deg_ = static_cast<float>(roll_deg);
@@ -582,6 +682,83 @@ void GaitEngine::ApplyRelax() {
     }
     servos_->SetHold(false);
     servos_->Relax();
+}
+
+// Crawl LIÊN TỤC (duty factor 3/4): cả 4 chân chạy trên MỘT đồng hồ, lệch pha 25% theo
+// kCrawlOrder. Vì 3 chân trụ quét về sau cùng MỘT tốc độ nên bàn chân của chúng đứng yên so với
+// nền ⇒ thân dịch đều và không bị kéo lết như bản tuần tự (chỉ 1 hip đẩy, 3 chân trụ lê theo).
+std::string GaitEngine::RunWalkContinuous(int steps, int swing_ms, float hip_forward,
+                                          float hip_back, float knee_fold) {
+    const float swing_frac = 0.25f;     // mỗi lúc đúng 1 chân vung ⇒ luôn còn 3 chân trụ
+    const int cycle_ms = swing_ms * 4;  // 1 bước = 1 chu kỳ 4 chân
+
+    // Cho limiter đủ slew/accel để bám: đỉnh là của hip lúc vung (|h'|max = 1.59) và của knee.
+    const float t_s = static_cast<float>(cycle_ms) / 1000.0f;
+    const float hold = std::clamp(GAIT_JOINT_LIFT_HOLD_FRAC, 0.0f, 0.6f);
+    const float rise = (1.0f - hold) * 0.5f;
+    const float hip_rate = fabsf(hip_forward - hip_back) * 1.6f / (swing_frac * t_s);
+    const float knee_rate = knee_fold / (rise * swing_frac * t_s);
+    SetTrackingProfile(servos_, std::max(hip_rate, knee_rate));
+
+    servos_->EnableOutputs();
+    servos_->SetHold(true);
+
+    float from[SERVO_COUNT];
+    float next[SERVO_COUNT];
+    servos_->GetCommandedAngles(from);
+
+    // 1) Đứng thẳng trước: mọi khớp ở neutral.
+    for (int i = 0; i < SERVO_COUNT; i++) {
+        next[i] = SERVO_DEFAULT_NEUTRAL_DEG;
+    }
+    if (!RampJoints(from, next, std::max(swing_ms, 400))) {
+        return "cancelled";
+    }
+
+    // 2) Vào nhịp: đưa 4 chân tới đúng pha xuất phát của chu kỳ (chân đầu tiên trong kCrawlOrder
+    //    bắt đầu vung, 3 chân kia trải đều trên hành trình). Các độ lệch cộng lại bằng 0 nên thân
+    //    KHÔNG trôi về sau — khác pha "park" cũ.
+    for (int i = 0; i < SERVO_COUNT; i++) {
+        from[i] = next[i];
+    }
+    for (int index = 0; index < 4; index++) {
+        const int leg = static_cast<int>(kCrawlOrder[index]);
+        float p = static_cast<float>(-index) * swing_frac;
+        p -= floorf(p);
+        LegPoseAtPhase(p, swing_frac, hip_forward, hip_back, knee_fold, &next[leg * 2],
+                       &next[leg * 2 + 1]);
+    }
+    if (!RampJoints(from, next, GAIT_JOINT_CRAWL_ENTRY_MS)) {
+        return "cancelled";
+    }
+
+    // 3) Đồng hồ chung: mỗi tick tính lại CẢ 4 chân theo pha riêng của nó.
+    const int ticks_per_cycle = std::max(cycle_ms / SERVO_UPDATE_PERIOD_MS, 8);
+    for (int t = 1; t <= ticks_per_cycle * steps; t++) {
+        if (cancel_.load()) {
+            return "cancelled";
+        }
+        const float g = static_cast<float>(t) / static_cast<float>(ticks_per_cycle);
+        for (int index = 0; index < 4; index++) {
+            const int leg = static_cast<int>(kCrawlOrder[index]);
+            float p = g - static_cast<float>(index) * swing_frac;
+            p -= floorf(p);
+            LegPoseAtPhase(p, swing_frac, hip_forward, hip_back, knee_fold, &next[leg * 2],
+                           &next[leg * 2 + 1]);
+        }
+        servos_->SetTargets(next);
+        vTaskDelay(pdMS_TO_TICKS(SERVO_UPDATE_PERIOD_MS));
+    }
+
+    // 4) Kết thúc: đứng thẳng lại từ tư thế cuối của chu kỳ, trả profile về mặc định.
+    for (int i = 0; i < SERVO_COUNT; i++) {
+        from[i] = next[i];
+        next[i] = SERVO_DEFAULT_NEUTRAL_DEG;
+    }
+    RampJoints(from, next, std::max(swing_ms, 400));
+    servos_->SetSlewDegPerSec(SERVO_SLEW_DEG_PER_SEC);
+    servos_->SetAccelDegPerSec2(SERVO_ACCEL_DEG_PER_SEC2);
+    return cancel_.load() ? "cancelled" : "walk complete";
 }
 
 std::string GaitEngine::RunWalkJoint(int steps, int step_ms, int8_t sign, float hip_travel_deg,
@@ -616,11 +793,19 @@ std::string GaitEngine::RunWalkJoint(int steps, int step_ms, int8_t sign, float 
     const int swing_ms = phase.swing;
     const int push_ms = phase.push;
     const int plant_settle_ms = phase.settle;
+    const bool sequential = crawl_sequential_.load();
+    const int swing_cont_ms = std::clamp(step_ms, 150, 2000);
     ESP_LOGI(TAG,
-             "joint walk: %d steps, swing %s, swing %d ms, plant settle %d ms, push %d ms, "
-             "hip travel %.0f deg, knee fold %.0f deg",
-             steps, swing_direct_.load() ? "direct" : "arc", swing_ms, plant_settle_ms, push_ms,
-             static_cast<double>(hip_travel_deg), static_cast<double>(knee_fold));
+             "joint walk: %d steps, crawl %s, swing %s, hip travel %.0f deg, knee fold %.0f deg, "
+             "swing %d ms -> 1 buoc %d ms",
+             steps, sequential ? "sequential" : "continuous",
+             (sequential && swing_direct_.load()) ? "direct" : "arc",
+             static_cast<double>(hip_travel_deg), static_cast<double>(knee_fold),
+             sequential ? swing_ms : swing_cont_ms,
+             sequential ? (swing_ms + plant_settle_ms + push_ms) * 4 : swing_cont_ms * 4);
+    if (!sequential) {
+        return RunWalkContinuous(steps, swing_cont_ms, hip_forward, hip_back, knee_fold);
+    }
 
     servos_->EnableOutputs();
     servos_->SetHold(true);
@@ -1212,6 +1397,22 @@ void GaitEngine::RegisterMcpTools() {
                     SetSwingDirect(direct);
                     return std::string("{\"ok\":true,\"swing\":\"") + (direct ? "direct" : "arc") +
                            "\"}";
+                });
+
+    mcp.AddTool("self.gait.crawl",
+                "Choose how the FOUR LEGS are coordinated. mode=\"continuous\" (default): all "
+                "four legs share one clock, 25% out of phase — one leg swings while the other "
+                "three sweep back together, so the body glides and the support feet do not "
+                "skate. mode=\"sequential\": one leg at a time (swing, wait for the foot to "
+                "land, then push) — slower and more stop-and-go. "
+                "Use for: cách phối hợp 4 chân, continuous, sequential.",
+                PropertyList({Property("mode", kPropertyTypeString, "continuous")}),
+                [this](const PropertyList& properties) -> ReturnValue {
+                    const std::string mode = properties["mode"].value<std::string>();
+                    const bool seq = (mode == "sequential" || mode == "seq");
+                    SetSequentialCrawl(seq);
+                    return std::string("{\"ok\":true,\"crawl\":\"") +
+                           (seq ? "sequential" : "continuous") + "\"}";
                 });
 
     mcp.AddTool("self.gait.leg_test",

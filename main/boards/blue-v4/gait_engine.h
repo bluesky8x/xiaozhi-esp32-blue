@@ -69,6 +69,12 @@ public:
     void SetSwingDirect(bool direct) { swing_direct_.store(direct); }
     bool SwingDirect() const { return swing_direct_.load(); }
 
+    // Cách PHỐI HỢP 4 CHÂN (xem GAIT_JOINT_SEQUENTIAL_CRAWL trong config.h):
+    // false = continuous (duty factor 3/4, cả 4 chân trên một đồng hồ) — mặc định.
+    // true  = sequential (từng chân một + push) — bản cũ.
+    void SetSequentialCrawl(bool sequential) { crawl_sequential_.store(sequential); }
+    bool SequentialCrawl() const { return crawl_sequential_.load(); }
+
     // Registers self.gait.* MCP tools.
     void RegisterMcpTools();
 
@@ -170,6 +176,10 @@ private:
     // Joint-space crawl: hip yaw travel and knee fold, both in degrees (0 = config default).
     std::string RunWalkJoint(int steps, int step_ms, int8_t sign, float hip_travel_deg,
                              float knee_travel_deg);
+    // Cách mới: duty factor 3/4 — cả 4 chân chạy trên một đồng hồ, lệch pha 25% (mỗi lúc 1 chân
+    // vung, 3 chân trụ quét cùng tốc độ). 1 bước = 1 chu kỳ = 4 x swing_ms.
+    std::string RunWalkContinuous(int steps, int swing_ms, float hip_forward, float hip_back,
+                                  float knee_fold);
     std::string RunLegSweep(int leg, int hip_deg, int knee_deg, int duration_ms);
     std::string RunTurn(int steps, int step_ms, int8_t sign);
     std::string RunDance(int segment_ms, const char* timeline);
@@ -182,6 +192,7 @@ private:
     std::atomic<bool> busy_{false};
     std::atomic<bool> cancel_{false};
     std::atomic<bool> swing_direct_{GAIT_JOINT_SWING_DIRECT != 0};
+    std::atomic<bool> crawl_sequential_{GAIT_JOINT_SEQUENTIAL_CRAWL != 0};
 
     float body_height_mm_ = BODY_STAND_HEIGHT_MM;
     float pitch_deg_ = 0.0f;
