@@ -105,14 +105,18 @@
 #define SERVO_COUNT 8
 #define SERVO_PWM_FREQ_HZ 50
 #define SERVO_PWM_RESOLUTION 4096
-// MG90S (and SG90-class) servos take ~1000..2000 us for 0..180 deg. The mapping in
-// ServoController is pulse = min + (angle/180) * (max - min), so a wider default (500..2500)
-// stretches every commanded angle 2x in the physical world AND drives the ends past the servo's
-// mechanical stops (the servo then just ticks/buzzes, stalls and sags the 5 V rail).
-// Keep these at the servo's real band; per-robot differences are handled by trim/invert
-// (persisted in NVS) instead. Overridable at runtime with self.servo.pulse_range.
-#define SERVO_MIN_PULSE_US 1000
-#define SERVO_MAX_PULSE_US 2000
+// Dải xung map thẳng vào 0..180 deg: pulse = min + (angle/180) * (max - min) ⇒ 0..180° = CẢ
+// dải xung. Vì vậy DẢI XUNG chính là GAIN (µs/độ) của toàn bộ mô hình góc.
+// MG90S (datasheet): 500 us (0°) / 1500 us (90°) / 2500 us (180°) ⇒ 11.1 µs/độ. Đây là dải THẬT
+// của servo nên 0..180° lệnh = 0..180° VẬT LÝ, và mọi hằng số *_DEG trong file này (cùng mô
+// hình hình học mm: bảng hạ thân, alpha=43.3°, "ngồi ~38°"…) mới đúng nghĩa.
+// ⚠️ 1000..2000 (~5.6 µs/độ) KHÔNG phải servo yếu — nó chỉ bóp mọi động tác còn NỬA hành trình
+// vật lý (servo không dùng hết dải). Các hằng số bên dưới đã được chỉnh lại theo dải 500..2500
+// (xem ghi chú ở từng hằng số) để giữ đúng hành vi đã hiệu chỉnh trên bàn.
+// Đổi lúc chạy: `srv:range=min-max` (lưu NVS pmin/pmax — NVS THẮNG giá trị ở đây).
+// Kiểm chứng servo có chạy hết dải không: `srv:travel=N` (0→180→0, 2 vòng, xong về neutral).
+#define SERVO_MIN_PULSE_US 500
+#define SERVO_MAX_PULSE_US 2500
 #define SERVO_UPDATE_PERIOD_MS 10  // 100 Hz interpolation tick (dày hơn = đường đi mượt hơn)
 // 1 = log the servo task rate/state once per second (bring-up diagnostics).
 #define SERVO_TICK_DEBUG_LOG 1
@@ -246,14 +250,17 @@
 #define GAIT_JOINT_HIP_NEUTRAL_DEG 90.0f  // centre of the hip sweep (mount neutral)
 // Hip servo = VERTICAL yaw axis (shaft pointing down, arm pointing to the body centre, leg
 // pointing outward on the body diagonal): the hip swings the foot sideways/fore-aft, so the
-// FORWARD travel per step is sqrt(2) * R * sin(travel/2). With R = 70 mm: 40 deg = ~34 mm,
-// 70 deg = ~57 mm, 90 deg = ~70 mm per step (90 deg = 45..135 deg on the servo, still inside
-// the 1000..2000 us band), 120 deg = ~86 mm (bench only).
-#define GAIT_JOINT_HIP_TRAVEL_DEG 90.0f  // walking default (override per call with hip_deg=)
-// Biên độ nhấc của knee. +20% so với bản 60 deg (chân nhấc cao hơn ~20%):
-//   knee đi từ 90 deg (chân chạm nền) lên 162 deg (1900 us — vẫn trong dải 1000..2000).
-// Muốn quay lại bản cũ: đổi 72.0f -> 60.0f.
-#define GAIT_JOINT_KNEE_TRAVEL_DEG 72.0f  // knee fold, lifts the foot (override with knee_deg=)
+// FORWARD travel per step is sqrt(2) * R * sin(travel/2). Với R = 70 mm: 22.5° ≈ 19 mm,
+// 45° ≈ 34 mm, 60° ≈ 43 mm, 90° ≈ 70 mm mỗi bước.
+// Lấy 45° vì đó ĐÚNG bằng hành trình đã test trên bàn (trước đây 90° trên thang nửa dải chỉ là
+// 45° vật lý). Muốn stride dài hơn: tăng dần 45 → 60 (≈43 mm/bước) rồi kiểm tra tải + độ ổn
+// định. Override từng lệnh bằng hip_deg=.
+#define GAIT_JOINT_HIP_TRAVEL_DEG 45.0f  // walking default (override per call with hip_deg=)
+// Biên độ nhấc của knee: knee đi từ 90° (chân chạm nền) lên 90+36 = 126° vật lý.
+// 36° = đúng biên độ nhấc đã test trên bàn (trước đây 72° trên thang nửa dải cũng chỉ là 36°
+// vật lý). Nhấc cao hơn (60-72°, tức 150-162°) thì chân vung đưa bàn chân lên quá cao và dễ
+// đụng thân sau khi gắn robot — chỉ dùng khi test trên bàn. Override bằng knee_deg=.
+#define GAIT_JOINT_KNEE_TRAVEL_DEG 36.0f  // knee fold, lifts the foot (override with knee_deg=)
 #define GAIT_JOINT_STEP_MS \
     1400  // default step_ms khi lệnh không nêu (xem GAIT_JOINT_SEQUENTIAL_CRAWL)
 
@@ -315,18 +322,23 @@
 //   CỰC ĐẠI ở gập 47° (càng thẳng đứng) -> 17.3 mm ⇒ gập thêm nữa KHÔNG hạ thêm được.
 #define LEG_TIBIA_LEN_MM 55.0f
 // Joint-space posture (spider geometry): extra knee fold per mm of body-height reduction.
-// Từ hình học thật: ở tư thế đứng 1 mm = 1/(55*cos43.3°*pi/180) ≈ 1.43° gập, nhưng độ hạ giảm
-// dần khi càng tiến về thẳng đứng nên lấy trung bình 1.30°/mm cho cả dải dùng được.
-#define GAIT_JOINT_CROUCH_DEG_PER_MM 1.30f
+// Hình học thật: ở tư thế đứng 1 mm = 1/(55*cos43.3°*pi/180) ≈ 1.43° gập, giảm dần khi càng
+// tiến về thẳng đứng nên lấy trung bình ~0.65°/mm cho cả dải dùng được.
+// Vì sao 0.65 chứ không 1.43: đây là góc VẬT LÝ. `BODY_MIN_HEIGHT_MM 66` ⇒ hạ 29 mm ảo ⇒
+// gập ~18.9° ⇒ hạ thân THẬT ~10.9 mm (đúng bảng hạ thân ở LEG_TIBIA_LEN_MM) — y như độ sâu
+// đã được duyệt "mượt, nhanh, đẹp" trên bàn. Muốn ngồi sâu hơn: tăng hệ số này (trần an toàn
+// cho 4 knee là ~0.9°/mm ⇒ 26° gập) rồi kiểm tra lại dòng/tiếng kêu.
+#define GAIT_JOINT_CROUCH_DEG_PER_MM 0.65f
 // --- Tốc độ đổi tư thế (ngồi / đứng / nghiêng) ---
-// Thời gian một LƯỢT = hành trình / tốc độ, kẹp trong [min, max]. Tốc độ là tốc độ GÓC của
-// servo (deg/s) và KHÔNG chia theo số servo cùng chạy ⇒ mọi tư thế có cùng "cảm giác nhanh
-// chậm": hành trình dài đi lâu hơn, hành trình ngắn xong sớm hơn.
-#define POSTURE_RATE_DEG_PER_SEC 140.0f
-// SÀN thời gian một LƯỢT — đây chính là chỗ trước đây làm nghiêng bị "nhích từng tí một":
-// sàn 300 ms ⇒ nghiêng 12° (19° knee) chỉ còn 64°/s, bản cũ 0.6°/độ (7° knee) còn 24°/s,
-// trong khi ngồi 38°/0.27 s = 140°/s ⇒ nhìn nhanh gấp 2-6 lần. Hạ xuống 150 ms để hành
-// trình ngắn cũng đạt ~130°/s, tức nghiêng nhanh/mượt như ngồi.
+// Thời gian một LƯỢT = hành trình / tốc độ, kẹp trong [min, max]. Tốc độ là tốc độ GÓC VẬT LÝ
+// của servo (deg/s) và KHÔNG chia theo số servo cùng chạy ⇒ mọi tư thế có cùng "cảm giác
+// nhanh chậm": hành trình dài đi lâu hơn, hành trình ngắn xong sớm hơn.
+// 70°/s = ĐÚNG tốc độ vật lý bạn đã khen ở "ngồi xuống" (trước đây 140°/s trên thang nửa dải
+// cũng chỉ là 70°/s vật lý). Giữ 70 để vừa đúng cảm giác cũ, vừa giữ dòng đỉnh trong ngân sách
+// rail 5 V/2 A.
+#define POSTURE_RATE_DEG_PER_SEC 70.0f
+// SÀN thời gian một LƯỢT: để một nhích rất nhỏ không đi quá nhanh. Nghiêng nhẹ vẫn xong trong
+// 150 ms (nghiêng 12° = 2 lượt x 274 ms).
 #define POSTURE_MIN_MS 150
 #define POSTURE_MAX_MS 900
 // Hành trình knee ≥ mức này thì mới phải chia LƯỢT. Dưới mức này làm một lượt (dòng không đáng
@@ -344,12 +356,15 @@
 #define POSTURE_SERVOS_PER_PHASE 2
 // Chênh lệch nhỏ hơn mức này (độ) coi như khớp đã ở đúng chỗ, khỏi đưa vào lượt.
 #define POSTURE_MOVE_EPS_DEG 0.5f
-// Độ gập thêm cho MỖI độ pitch/roll. 1.6 ⇒ `pst:lt` (mặc định 12°) = ±19° chênh giữa 2 bên:
-// bên "thấp" gập xuống như ngồi, bên kia duỗi ra đứng thẳng (bản cũ 0.6f ⇒ chỉ ±7°, quá nhỏ).
+// Độ gập thêm cho MỖI độ pitch/roll. 1.6 ⇒ `pst:lt` (mặc định 12°) = ±19.2° VẬT LÝ chênh giữa
+// 2 bên (với dải 500..2500; trước đây trên thang nửa dải chỉ còn ±9.6° nên nghiêng nhìn rất ít).
+// Bên "thấp" gập xuống như ngồi, bên kia duỗi ra đứng thẳng. Muốn nghiêng nhẹ lại: 1.6 → 0.8.
 #define GAIT_JOINT_TILT_DEG_PER_DEG 1.6f
 // Kẹp riêng 2 phía: cơ cấu gập được sâu hơn nhiều so với khi duỗi ngược ra ngoài.
-#define GAIT_JOINT_TILT_MAX_FOLD_DEG 35.0f    // trần phía gập (ngồi sâu nhất ~38°)
-#define GAIT_JOINT_TILT_MAX_EXTEND_DEG 20.0f  // trần phía duỗi (knee mở ra ngoài)
+#define GAIT_JOINT_TILT_MAX_FOLD_DEG \
+    35.0f                                     // trần phía gập (ngồi hiện tại ~19°; trần cơ khí
+                                              // đo trên bàn khi test riêng 1 chân là ~43°)
+#define GAIT_JOINT_TILT_MAX_EXTEND_DEG 20.0f  // trần phía duỗi (knee mở ra ngoài ~20°)
 // Khoảng cách NGANG từ trục yaw tới bàn chân ở tư thế đứng. Không phải số đo trực tiếp mà suy
 // ra từ 2 số đo kia: R = LEG_FEMUR_MM + LEG_TIBIA_MM*cos(alpha) = 30 + 55*cos(43.3°) = 69.9 mm ✓
 // (khớp với R ≈ 70 mm đo được trước đó ⇒ 3 số đo độc lập ăn khớp nhau).

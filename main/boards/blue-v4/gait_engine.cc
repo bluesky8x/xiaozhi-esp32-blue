@@ -1317,7 +1317,8 @@ void GaitEngine::RegisterMcpTools() {
                 "power rail). One leg moves at a time, so the robot stays statically stable. "
                 "hip_deg/knee_deg override the travel for this call (0 = firmware default); on "
                 "the bench you can use hip_deg=120 knee_deg=60 to inspect the full travel, but "
-                "keep 30-45 deg when walking on the floor.",
+                "keep hip_deg 30-45 / knee_deg 25-40 deg when walking on the floor "
+                "(defaults are 45 / 36).",
                 PropertyList({Property("direction", kPropertyTypeInteger, 1, -1, 1),
                               Property("steps", kPropertyTypeInteger, 1, 1, 8),
                               Property("stride_mm", kPropertyTypeInteger, 40, 10, 60),

@@ -66,14 +66,21 @@ public:
     // Cancelled automatically as soon as any pose/target is published.
     void StartBootNeutral(uint32_t delay_ms);
 
-    // Move ONE joint from its current angle to `to_deg` over duration_ms (smoothstep). Runs in the
-    // worker task, independent of the gait engine: use it to prove the PWM path works.
-    bool SweepJoint(uint8_t joint, float to_deg, uint32_t duration_ms);
+    // Move ONE joint to `to_deg` over duration_ms (smoothstep). Runs in the worker task,
+    // independent of the gait engine: use it to prove the PWM path works.
+    // Travel test: `from_deg` < 0 = start from the current angle; `laps` = số lần đi hết hành
+    // trình from->to; mỗi vòng tự quay về from nên tổng là laps*2 lượt (laps=2 ⇒
+    // 0->180->0->180->0), tốc độ như nhau ở cả hai chiều.
+    // `end_neutral` = true: sau khi xong thì đi thêm một lượt về SERVO_DEFAULT_NEUTRAL_DEG
+    // (đúng vị trí đứng của gait) thay vì dừng ở góc xuất phát.
+    bool SweepJoint(uint8_t joint, float from_deg, float to_deg, uint32_t duration_ms, int laps,
+                    bool end_neutral = false);
 
     // ---- pulse calibration ----
-    // Raw pulse band (us) that maps onto 0..180 deg. Defaults come from config.h, overridable at
-    // runtime (persisted in NVS) so a servo whose usable band is e.g. 1000..2000 us can be matched
-    // without reflashing.
+    // Raw pulse band (us) that maps onto 0..180 deg. Defaults come from config.h (500..2500 us =
+    // the MG90S datasheet band), overridable at runtime (persisted in NVS) so a servo that binds
+    // before the ends can use a narrower band without reflashing — nhớ rằng dải hẹp hơn làm mọi
+    // hành trình vật lý ngắn lại (1000..2000 us ⇒ 0..180° lệnh chỉ đi nửa hành trình thật).
     void SetPulseRange(uint16_t min_us, uint16_t max_us);
     void GetPulseRange(uint16_t* min_us, uint16_t* max_us) const;
     // Hold one joint at an exact pulse width, bypassing the angle mapping entirely (hardware test).
@@ -117,6 +124,8 @@ private:
         int32_t value;
         int32_t value2;
         int32_t value3;
+        int32_t value4;
+        int32_t value5;
     };
 
     void LoadTrims();
@@ -131,7 +140,7 @@ private:
     static void TaskEntry(void* arg);
     void TaskLoop();
     bool Enqueue(CmdType type, uint8_t joint = 0, int32_t value = 0, int32_t value2 = 0,
-                 int32_t value3 = 0);
+                 int32_t value3 = 0, int32_t value4 = 0, int32_t value5 = 0);
 
     Pca9685 pca_;
     bool ready_ = false;
@@ -162,6 +171,9 @@ private:
     int64_t boot_release_at_ms_ = 0;  // 0 = inactive; release pose hold at this time
     int64_t sweep_end_ms_ = 0;        // 0 = inactive; smoothstep sweep deadline
     int64_t sweep_start_ms_ = 0;
+    int32_t sweep_duration_ms_ = 0;    // thời gian MỖI lượt (lượt đi và lượt về bằng nhau)
+    int32_t sweep_laps_left_ = 0;      // số lượt còn lại (1 vòng = 2 lượt: đi + về)
+    bool sweep_home_neutral_ = false;  // lượt cuối: về neutral thay vì về góc xuất phát
     uint8_t sweep_joint_ = 0;
     float sweep_from_deg_ = SERVO_DEFAULT_NEUTRAL_DEG;
     float sweep_to_deg_ = SERVO_DEFAULT_NEUTRAL_DEG;

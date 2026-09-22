@@ -143,20 +143,25 @@ uint16_t ServoController::AngleToPulseUs(uint8_t joint, float angle_deg) const {
 }
 
 bool ServoController::Enqueue(CmdType type, uint8_t joint, int32_t value, int32_t value2,
-                              int32_t value3) {
+                              int32_t value3, int32_t value4, int32_t value5) {
     if (cmd_queue_ == nullptr) {
         return false;
     }
-    const Cmd cmd = {type, joint, value, value2, value3};
+    const Cmd cmd = {type, joint, value, value2, value3, value4, value5};
     return xQueueSend(cmd_queue_, &cmd, 0) == pdTRUE;
 }
 
-bool ServoController::SweepJoint(uint8_t joint, float to_deg, uint32_t duration_ms) {
+bool ServoController::SweepJoint(uint8_t joint, float from_deg, float to_deg, uint32_t duration_ms,
+                                 int laps, bool end_neutral) {
     if (joint >= SERVO_COUNT) {
         return false;
     }
-    return Enqueue(CmdType::kSweep, joint, static_cast<int32_t>(lroundf(to_deg * 10.0f)), 0,
-                   static_cast<int32_t>(duration_ms));
+    // Mỗi "vòng" là đi from->to rồi quay về from ⇒ 2 lượt. Số lượt = laps*2, đảo chiều sau mỗi
+    // lượt, kết thúc đúng ở góc xuất phát (không để servo nằm ở góc lạ sau khi test).
+    const int32_t traversals = static_cast<int32_t>(std::clamp(laps, 1, 4)) * 2;
+    return Enqueue(CmdType::kSweep, joint, static_cast<int32_t>(lroundf(to_deg * 10.0f)),
+                   static_cast<int32_t>(lroundf(from_deg * 10.0f)),
+                   static_cast<int32_t>(duration_ms), traversals, end_neutral ? 1 : 0);
 }
 
 bool ServoController::RawChannel(uint8_t channel, uint16_t pulse_us) {
@@ -225,6 +230,8 @@ bool ServoController::RawPulse(uint8_t joint, uint16_t pulse_us) {
         boot_neutral_at_ms_ = 0;
         boot_release_at_ms_ = 0;
         sweep_end_ms_ = 0;
+        sweep_laps_left_ = 0;
+        sweep_home_neutral_ = false;
         slew_deg_per_sec_ = 400.0f;
         accel_deg_per_sec2_ = 2000.0f;
         hold_ = true;
@@ -488,17 +495,23 @@ void ServoController::RunCommand(const Cmd& cmd) {
             boot_release_at_ms_ = 0;
             boot_neutral_at_ms_ = 0;
             sweep_joint_ = cmd.joint;
-            sweep_from_deg_ = current_deg_[cmd.joint];
+            sweep_from_deg_ =
+                cmd.value2 >= 0 ? static_cast<float>(cmd.value2) * 0.1f : current_deg_[cmd.joint];
             sweep_to_deg_ = static_cast<float>(cmd.value) * 0.1f;
             sweep_start_ms_ = esp_timer_get_time() / 1000;
-            const int64_t duration = std::max<int64_t>(cmd.value3, 200);
-            sweep_end_ms_ = sweep_start_ms_ + duration;
+            sweep_duration_ms_ = static_cast<int32_t>(std::max<int64_t>(cmd.value3, 200));
+            sweep_laps_left_ = std::max<int32_t>(cmd.value4, 1);
+            sweep_home_neutral_ = cmd.value5 != 0;
+            sweep_end_ms_ = sweep_start_ms_ + sweep_duration_ms_;
             slew_deg_per_sec_ = std::max(30.0f, fabsf(sweep_to_deg_ - sweep_from_deg_) * 2000.0f /
-                                                    static_cast<float>(duration));
+                                                    static_cast<float>(sweep_duration_ms_));
             accel_deg_per_sec2_ = std::max(400.0f, slew_deg_per_sec_ * 4.0f);
-            ESP_LOGI(TAG, "sweep joint %d: %.1f -> %.1f deg over %lld ms", cmd.joint,
-                     static_cast<double>(sweep_from_deg_), static_cast<double>(sweep_to_deg_),
-                     duration);
+            ESP_LOGI(TAG,
+                     "sweep joint %d: %.1f -> %.1f deg over %d ms x%d luot (band %u..%u us, "
+                     "slew %.0f deg/s)",
+                     cmd.joint, static_cast<double>(sweep_from_deg_),
+                     static_cast<double>(sweep_to_deg_), sweep_duration_ms_, sweep_laps_left_,
+                     min_pulse_us_, max_pulse_us_, static_cast<double>(slew_deg_per_sec_));
             break;
         }
     }
@@ -525,9 +538,42 @@ void ServoController::Tick(float dt_s) {
             ClampAngle(sweep_joint_, sweep_from_deg_ + (sweep_to_deg_ - sweep_from_deg_) * k);
         if (progress >= 1.0f) {
             target_deg_[sweep_joint_] = ClampAngle(sweep_joint_, sweep_to_deg_);
-            sweep_end_ms_ = 0;
-            ESP_LOGI(TAG, "sweep done: joint %d at %.1f deg", sweep_joint_,
-                     static_cast<double>(current_deg_[sweep_joint_]));
+            sweep_laps_left_--;
+            if (sweep_laps_left_ > 0) {
+                // Đảo chiều: lượt sau quay ngược lại, cùng thời gian ⇒ cùng tốc độ, đi-về đều nhau.
+                const float back = sweep_from_deg_;
+                sweep_from_deg_ = sweep_to_deg_;
+                sweep_to_deg_ = back;
+                sweep_start_ms_ = now_ms;
+                sweep_end_ms_ = now_ms + sweep_duration_ms_;
+                ESP_LOGI(TAG, "sweep joint %d: doi chieu -> %.1f deg (con %d luot)", sweep_joint_,
+                         static_cast<double>(sweep_to_deg_), sweep_laps_left_);
+            } else if (sweep_home_neutral_) {
+                // Test xong: đưa joint về NEUTRAL (đúng vị trí đứng của gait) thay vì để nó nằm ở
+                // 0° hay 180°. Cùng tốc độ góc với các lượt test ⇒ thời gian tỉ lệ hành trình.
+                sweep_home_neutral_ = false;
+                const float neutral = ClampAngle(sweep_joint_, SERVO_DEFAULT_NEUTRAL_DEG);
+                const float travel = fabsf(neutral - sweep_to_deg_);
+                if (travel > 0.5f) {
+                    sweep_from_deg_ = sweep_to_deg_;
+                    sweep_to_deg_ = neutral;
+                    sweep_start_ms_ = now_ms;
+                    const int32_t ms = std::max<int32_t>(
+                        200, static_cast<int32_t>(travel * static_cast<float>(sweep_duration_ms_) /
+                                                  180.0f));
+                    sweep_end_ms_ = now_ms + ms;
+                    ESP_LOGI(TAG, "sweep joint %d: ve neutral %.1f deg trong %d ms", sweep_joint_,
+                             static_cast<double>(sweep_to_deg_), ms);
+                } else {
+                    sweep_end_ms_ = 0;
+                    ESP_LOGI(TAG, "sweep done: joint %d da o neutral %.1f deg", sweep_joint_,
+                             static_cast<double>(current_deg_[sweep_joint_]));
+                }
+            } else {
+                sweep_end_ms_ = 0;
+                ESP_LOGI(TAG, "sweep done: joint %d at %.1f deg", sweep_joint_,
+                         static_cast<double>(current_deg_[sweep_joint_]));
+            }
         }
     }
 
@@ -595,16 +641,22 @@ void ServoController::Tick(float dt_s) {
         if (limit > slew_deg_per_sec_) {
             limit = slew_deg_per_sec_;
         }
-        float vel = vel_deg_s_[i] + accel_deg_per_sec2_ * dt_s;
-        if (vel > limit) {
-            vel = limit;
+        // `vel_deg_s_` PHẢI lưu tốc độ CÓ DẤU (dấu = chiều đang chạy). Trước đây nó lưu độ lớn
+        // (luôn dương) nên phép kiểm tra đảo chiều ở trên LUÔN đúng khi dir = -1 ⇒ tốc độ bị
+        // reset về 0 MỖI tick và joint chỉ bò đúng một tick gia tốc = accel*dt = 24°/s, thay vì
+        // tăng tốc tới slew 600°/s. Đó là lý do MỌI chuyển động theo chiều GIẢM góc (duỗi knee,
+        // nghiêng sang bên kia, hip quét về sau…) rất chậm — bò "từng tí một" — còn chiều tăng
+        // góc thì bình thường (nên ngồi xuống nhanh/mượt mà nghiêng thì chậm).
+        float speed = fabsf(vel_deg_s_[i]) + accel_deg_per_sec2_ * dt_s;
+        if (speed > limit) {
+            speed = limit;
         }
-        if (vel < 1.0f) {
-            vel = std::min(limit, 1.0f);  // never crawl slower than 1 deg/s
+        if (speed < 1.0f) {
+            speed = std::min(limit, 1.0f);  // never crawl slower than 1 deg/s
         }
-        vel_deg_s_[i] = vel;
+        vel_deg_s_[i] = speed * dir;
 
-        const float step = vel * dt_s;
+        const float step = speed * dt_s;
         if (step >= dist) {
             current_deg_[i] = target_deg_[i];
             vel_deg_s_[i] = 0.0f;
@@ -764,38 +816,56 @@ void ServoController::RegisterMcpTools() {
                 });
 
     mcp.AddTool("self.servo.sweep",
-                "Bring-up test: sweep ONE joint from its current angle to to_deg over duration_ms "
-                "using a timed smoothstep curve (no gait engine involved). Use it to prove the "
-                "PWM/servo path works, e.g. joint=0 to_deg=120 duration_ms=3000 then "
-                "to_deg=60 duration_ms=3000. Joints 0..7 = FL hip/knee, FR hip/knee, RL hip/knee, "
+                "Bring-up / travel test for ONE joint: drive it from `from_deg` to `to_deg` over "
+                "duration_ms using a timed smoothstep curve, bouncing back and forth for `laps` "
+                "trips (each trip returns home, so total time = laps * 2 * duration_ms). "
+                "from_deg < 0 = start from the current angle. Full-travel check: from_deg=0, "
+                "to_deg=180, duration_ms=600, laps=2, end_neutral=1 so it finishes at the neutral "
+                "90 deg stand position. Joints 0..7 = FL hip/knee, FR hip/knee, RL hip/knee, "
                 "RR hip/knee.",
                 PropertyList({Property("joint", kPropertyTypeInteger, 0, 0, SERVO_COUNT - 1),
-                              Property("to_deg", kPropertyTypeInteger, 120, 0, 180),
-                              Property("duration_ms", kPropertyTypeInteger, 3000, 200, 15000)}),
+                              Property("to_deg", kPropertyTypeInteger, 180, 0, 180),
+                              Property("duration_ms", kPropertyTypeInteger, 600, 200, 15000),
+                              Property("from_deg", kPropertyTypeInteger, -1, -1, 180),
+                              Property("laps", kPropertyTypeInteger, 1, 1, 4),
+                              Property("end_neutral", kPropertyTypeInteger, 0, 0, 1)}),
                 [this](const PropertyList& properties) -> ReturnValue {
                     const int joint = properties["joint"].value<int>();
                     const int to_deg = properties["to_deg"].value<int>();
                     const int duration_ms = properties["duration_ms"].value<int>();
+                    const int from_deg = properties["from_deg"].value<int>();
+                    const int laps = properties["laps"].value<int>();
+                    const bool end_neutral = properties["end_neutral"].value<int>() != 0;
                     if (!hardware_) {
                         return std::string("error: PCA9685 not detected");
                     }
-                    if (!SweepJoint(static_cast<uint8_t>(joint), static_cast<float>(to_deg),
-                                    static_cast<uint32_t>(duration_ms))) {
+                    if (!SweepJoint(static_cast<uint8_t>(joint), static_cast<float>(from_deg),
+                                    static_cast<float>(to_deg), static_cast<uint32_t>(duration_ms),
+                                    laps, end_neutral)) {
                         return std::string("error: queue full");
                     }
-                    char buf[128];
-                    snprintf(buf, sizeof(buf), "{\"ok\":true,\"joint\":%d,\"to_deg\":%d,\"ms\":%d}",
-                             joint, to_deg, duration_ms);
+                    uint16_t lo = 0;
+                    uint16_t hi = 0;
+                    GetPulseRange(&lo, &hi);
+                    char buf[224];
+                    snprintf(buf, sizeof(buf),
+                             "{\"ok\":true,\"joint\":%d,\"from_deg\":%d,\"to_deg\":%d,\"ms\":%d,"
+                             "\"laps\":%d,\"total_ms\":%d,\"end_neutral\":%d,\"band_us\":[%u,%u]}",
+                             joint, from_deg, to_deg, duration_ms, laps, laps * 2 * duration_ms,
+                             end_neutral ? 1 : 0, lo, hi);
                     return std::string(buf);
                 });
 
     mcp.AddTool(
         "self.servo.pulse_range",
         "Get/set the raw pulse band (microseconds) that maps onto 0..180 deg, persisted in "
-        "NVS. Most MG90S-style servos accept about 1000..2000 us; the firmware default is "
-        "500..2500 us, which can push a servo past its mechanical stop (the servo then just "
-        "ticks and does not turn). Pass min_us and max_us to change it; pass 0/0 to just "
-        "read the current values.",
+        "NVS. The firmware default is 500..2500 us (config.h SERVO_MIN/MAX_PULSE_US) = the "
+        "MG90S datasheet band (500 us = 0 deg, 1500 us = 90 deg, 2500 us = 180 deg), so the "
+        "commanded angles are real physical degrees and the leg geometry maths holds. "
+        "Narrower bands are for a servo that binds before the ends (e.g. 1000..2000 us): they "
+        "HALVE the physical travel of every commanded angle, so all the tuned pose/gait "
+        "constants would have to be doubled to keep the same motion. Pass min_us and "
+        "max_us to change it; pass 0/0 to just read the current values.",
         PropertyList({Property("min_us", kPropertyTypeInteger, 0, 0, 2500),
                       Property("max_us", kPropertyTypeInteger, 0, 0, 2500)}),
         [this](const PropertyList& properties) -> ReturnValue {

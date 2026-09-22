@@ -135,6 +135,29 @@ menuconfig: **Board type → Blue V4 (ESP32-S3 quadruped, PCA9685 servos)** and
 `BODY_STAND_HEIGHT_MM`, `STRIDE_LENGTH_MM`, `SERVO_SLEW_DEG_PER_SEC`,
 `SERVO_IDLE_RELAX_MS`, `SERVO_MAX_ACTIVE_MOVING`.
 
+## Pulse band = angle gain (đọc trước khi chỉnh bất kỳ số nào)
+
+The PCA9685 maps `pulse = min_us + (angle/180) * (max_us - min_us)`, so **the pulse band is
+the gain of the whole angle model**. `SERVO_MIN/MAX_PULSE_US` defaults to **500..2500 µs**
+(the MG90S datasheet band: 500 µs = 0°, 1500 µs = 90°, 2500 µs = 180°), which makes the
+commanded angles equal to real physical degrees — that is what all the geometry maths
+(`LEG_*_MM`, the crouch table, α = 43.3°) assumes.
+
+| Band | µs/deg | Effect |
+|---|---|---|
+| 500..2500 (default) | 11.1 | 0..180° commanded **= 0..180° physical**; full servo range |
+| 1000..2000 | 5.6 | every motion is **half** the physical size (the servo never uses its ends) |
+
+Change it at runtime with `srv:range=500-2500` (persisted in NVS `pmin`/`pmax`, which wins
+over `config.h`), and prove the servo really reaches both ends with `srv:travel=N`
+(`0°→180°→0°` twice, then back to neutral 90°). If a servo buzzes or binds before the ends,
+use a narrower band **and double every angle delta** in `config.h` to keep the same motion.
+
+Key joint-space values (all in **physical** degrees with the default band): stand = all
+joints at 90°; sit = knee 90+18.9° (`GAIT_JOINT_CROUCH_DEG_PER_MM`); tilt 12° = knees ±19.2°
+(`GAIT_JOINT_TILT_DEG_PER_DEG`); walk = hip ±22.5° and knee lift 36°; posture motion runs at
+`POSTURE_RATE_DEG_PER_SEC` = 70 °/s physical.
+
 The hip/knee servo mapping constants live at the top of `gait_engine.cc`
 (`kHipServoSign`, `kKneeServoSign`, centers) and must be validated on the real frame —
 see the bring-up checklist in `WIRING.md`.
